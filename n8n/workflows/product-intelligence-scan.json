@@ -1,0 +1,678 @@
+{
+  "name": "Product Intelligence - Batch Scan, Retry & Status Monitor",
+  "nodes": [
+    {
+      "parameters": {
+        "triggerTimes": {
+          "item": [
+            {
+              "mode": "everyMinute",
+              "value": 30
+            }
+          ]
+        }
+      },
+      "name": "Cron Trigger",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1.1,
+      "position": [
+        220,
+        300
+      ],
+      "id": "cron-trigger"
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "={{ $env.INTAKE_URL }}/api/v1/scan",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "httpHeaderAuth": "={{ $env.INTAKE_API_KEY }}",
+        "options": {
+          "bodyContentType": "json",
+          "requestTimeout": 30
+        },
+        "bodyParametersJson": "{\n  \"force\": false\n}",
+        "jsonParameters": true,
+        "responseFormat": "json"
+      },
+      "name": "Scan for Batches",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        460,
+        300
+      ],
+      "id": "scan-batches",
+      "notes": "Discovers _READY packages and registers them in Supabase. Idempotent: unchanged packages are skipped.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "requestMethod": "GET",
+        "url": "={{ $env.INTAKE_URL }}/api/v1/batches",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "httpHeaderAuth": "={{ $env.INTAKE_API_KEY }}",
+        "options": {
+          "bodyContentType": "json",
+          "requestTimeout": 30
+        },
+        "responseFormat": "json"
+      },
+      "name": "List All Batches",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        700,
+        300
+      ],
+      "id": "list-batches",
+      "notes": "Returns all batches. n8n splits the array into one item per batch for downstream routing.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.status }}",
+              "operation": "equals",
+              "value2": "completed"
+            }
+          ]
+        },
+        "mode": "single"
+      },
+      "name": "Batch Completed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1.1,
+      "position": [
+        940,
+        100
+      ],
+      "id": "if-completed"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.status }}",
+              "operation": "equals",
+              "value2": "failed"
+            }
+          ]
+        },
+        "mode": "single"
+      },
+      "name": "Batch Failed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1.1,
+      "position": [
+        940,
+        300
+      ],
+      "id": "if-failed"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.status }}",
+              "operation": "equals",
+              "value2": "awaiting_review"
+            }
+          ]
+        },
+        "mode": "single"
+      },
+      "name": "Awaiting Review?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1.1,
+      "position": [
+        940,
+        500
+      ],
+      "id": "if-awaiting-review"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.status }}",
+              "operation": "equals",
+              "value2": "processing"
+            }
+          ]
+        },
+        "mode": "single"
+      },
+      "name": "Still Processing?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1.1,
+      "position": [
+        940,
+        700
+      ],
+      "id": "if-processing"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.status }}",
+              "operation": "equals",
+              "value2": "discovered"
+            }
+          ]
+        },
+        "mode": "single"
+      },
+      "name": "Is Discovered?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1.1,
+      "position": [
+        1180,
+        900
+      ],
+      "id": "if-discovered"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.status }}",
+              "operation": "equals",
+              "value2": "pending"
+            }
+          ]
+        },
+        "mode": "single"
+      },
+      "name": "Is Pending?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1.1,
+      "position": [
+        1420,
+        900
+      ],
+      "id": "if-pending"
+    },
+    {
+      "parameters": {
+        "requestMethod": "POST",
+        "url": "={{ $env.INTAKE_URL }}/api/v1/batches/{{ $json.batch_id }}/process",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "httpHeaderAuth": "={{ $env.INTAKE_API_KEY }}",
+        "options": {
+          "bodyContentType": "json",
+          "requestTimeout": 30
+        },
+        "bodyParametersJson": "{\n  \"force\": true\n}",
+        "jsonParameters": true,
+        "responseFormat": "json"
+      },
+      "name": "Process Batch",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1660,
+        900
+      ],
+      "id": "process-batch",
+      "notes": "Starts (discovered) or retries (pending) processing via the existing M8 endpoint. M8 enforces retry limits (MAX_RETRIES), concurrency guards, stale-lock recovery and dead-lettering. n8n never retries terminal/dead-lettered jobs itself.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "values": [
+          {
+            "name": "batch_id",
+            "value": "={{ $json.batch_id }}"
+          },
+          {
+            "name": "status",
+            "value": "={{ $json.status }}"
+          },
+          {
+            "name": "job_id",
+            "value": "={{ $json.job_id }}"
+          },
+          {
+            "name": "job_type",
+            "value": "={{ $json.job_type }}"
+          },
+          {
+            "name": "retry_count",
+            "value": "={{ $json.result_summary.retry_count }}"
+          },
+          {
+            "name": "action",
+            "value": "processing_started_or_retry_scheduled"
+          },
+          {
+            "name": "notification_type",
+            "value": "processing_started"
+          },
+          {
+            "name": "notified_at",
+            "value": "={{ $now }}"
+          }
+        ],
+        "options": {}
+      },
+      "name": "Notify: Processing Started",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1.1,
+      "position": [
+        1900,
+        900
+      ],
+      "id": "notify-processing-started",
+      "notes": "Connect this node to your notification channel (email, Slack, webhook, etc.).",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "values": [
+          {
+            "name": "batch_id",
+            "value": "={{ $json.batch_id }}"
+          },
+          {
+            "name": "status",
+            "value": "={{ $json.status }}"
+          },
+          {
+            "name": "completed_at",
+            "value": "={{ $json.completed_at }}"
+          },
+          {
+            "name": "total_products",
+            "value": "={{ $json.total_products }}"
+          },
+          {
+            "name": "total_images",
+            "value": "={{ $json.total_images }}"
+          },
+          {
+            "name": "error_message",
+            "value": "={{ $json.error_message }}"
+          },
+          {
+            "name": "notification_type",
+            "value": "batch_completed"
+          },
+          {
+            "name": "notified_at",
+            "value": "={{ $now }}"
+          }
+        ],
+        "options": {}
+      },
+      "name": "Notify: Batch Completed",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1.1,
+      "position": [
+        1180,
+        100
+      ],
+      "id": "notify-completed",
+      "notes": "Connect this node to your notification channel (email, Slack, webhook, etc.)",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "values": [
+          {
+            "name": "batch_id",
+            "value": "={{ $json.batch_id }}"
+          },
+          {
+            "name": "status",
+            "value": "={{ $json.status }}"
+          },
+          {
+            "name": "error_message",
+            "value": "={{ $json.error_message }}"
+          },
+          {
+            "name": "total_products",
+            "value": "={{ $json.total_products }}"
+          },
+          {
+            "name": "notification_type",
+            "value": "batch_dead_lettered"
+          },
+          {
+            "name": "notified_at",
+            "value": "={{ $now }}"
+          }
+        ],
+        "options": {}
+      },
+      "name": "Notify: Batch Dead-Lettered",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1.1,
+      "position": [
+        1180,
+        300
+      ],
+      "id": "notify-dead-lettered",
+      "notes": "Terminal state per M8: failed = retries exhausted / dead-lettered. n8n does NOT retry dead-lettered jobs. Investigate via GET /batches/{id}/status (result_summary.dead_letter).",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "requestMethod": "GET",
+        "url": "={{ $env.INTAKE_URL }}/api/v1/batches/{{ $json.batch_id }}/image-matches",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "httpHeaderAuth": "={{ $env.INTAKE_API_KEY }}",
+        "options": {
+          "bodyContentType": "json",
+          "requestTimeout": 30
+        },
+        "responseFormat": "json"
+      },
+      "name": "Get Unmatched Images",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1180,
+        500
+      ],
+      "id": "get-image-matches",
+      "notes": "Lists product images that need human review (matched to a product image asset but not yet linked to a canonical product).",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "values": [
+          {
+            "name": "batch_id",
+            "value": "={{ $json.batch_id }}"
+          },
+          {
+            "name": "status",
+            "value": "={{ $json.status }}"
+          },
+          {
+            "name": "unmatched_images",
+            "value": "={{ $json.unmatched_images }}"
+          },
+          {
+            "name": "unmatched_count",
+            "value": "={{ $json.count }}"
+          },
+          {
+            "name": "notification_type",
+            "value": "review_required"
+          },
+          {
+            "name": "notified_at",
+            "value": "={{ $now }}"
+          }
+        ],
+        "options": {}
+      },
+      "name": "Notify: Review Required",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1.1,
+      "position": [
+        1420,
+        500
+      ],
+      "id": "notify-review",
+      "notes": "Connect this node to your notification channel for human review routing.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "values": [
+          {
+            "name": "batch_id",
+            "value": "={{ $json.batch_id }}"
+          },
+          {
+            "name": "status",
+            "value": "={{ $json.status }}"
+          },
+          {
+            "name": "action",
+            "value": "poll_again_next_cycle"
+          },
+          {
+            "name": "notified_at",
+            "value": "={{ $now }}"
+          }
+        ],
+        "options": {}
+      },
+      "name": "Status: Still Processing",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1.1,
+      "position": [
+        1380,
+        700
+      ],
+      "id": "still-processing",
+      "notes": "Batch is still being processed. Will be re-checked on the next cron tick.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "requestMethod": "GET",
+        "url": "={{ $env.INTAKE_URL }}/api/v1/batches/{{ $json.batch_id }}/status",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "httpHeaderAuth": "={{ $env.INTAKE_API_KEY }}",
+        "options": {
+          "bodyContentType": "json",
+          "requestTimeout": 30
+        },
+        "responseFormat": "json"
+      },
+      "name": "Get Job Status Detail",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1140,
+        700
+      ],
+      "id": "get-job-status"
+    }
+  ],
+  "connections": {
+    "Cron Trigger": {
+      "main": [
+        [
+          {
+            "node": "Scan for Batches",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "List All Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scan for Batches": {
+      "main": [
+        []
+      ]
+    },
+    "List All Batches": {
+      "main": [
+        [
+          {
+            "node": "Batch Completed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Batch Completed?": {
+      "main": [
+        [
+          {
+            "node": "Notify: Batch Completed",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Batch Failed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Batch Failed?": {
+      "main": [
+        [
+          {
+            "node": "Notify: Batch Dead-Lettered",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Awaiting Review?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Awaiting Review?": {
+      "main": [
+        [
+          {
+            "node": "Get Unmatched Images",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Still Processing?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Still Processing?": {
+      "main": [
+        [
+          {
+            "node": "Get Job Status Detail",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Is Discovered?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Job Status Detail": {
+      "main": [
+        [
+          {
+            "node": "Status: Still Processing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Discovered?": {
+      "main": [
+        [
+          {
+            "node": "Process Batch",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Is Pending?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Pending?": {
+      "main": [
+        [
+          {
+            "node": "Process Batch",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Process Batch": {
+      "main": [
+        [
+          {
+            "node": "Notify: Processing Started",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Unmatched Images": {
+      "main": [
+        [
+          {
+            "node": "Notify: Review Required",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "none",
+    "saveDataErrorExecution": "warning",
+    "saveDataSuccessExecution": "false",
+    "saveManualExecutions": "true",
+    "callerPolicy": "workflowsFromSameOwner",
+    "timezone": "UTC"
+  },
+  "id": "product-intelligence-scan-monitor",
+  "active": false,
+  "meta": {
+    "instanceId": "product-intelligence",
+    "templateCredsSetupCompleted": true
+  }
+}

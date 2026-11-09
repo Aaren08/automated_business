@@ -1,0 +1,39 @@
+# Override for Product Intelligence Intake Service
+# This extends compose.yml without modifying it
+
+volumes:
+  intake-data:
+
+services:
+  intake:
+    build:
+      context: ./intake-service
+      dockerfile: Dockerfile
+    image: product-intake:local
+    volumes:
+      - type: bind
+        source: ${OBSIDIAN_SUPPLIER_PATH}
+        target: /data/inbox
+        read_only: true
+      - intake-data:/data/working
+    environment:
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
+      - S3_ENDPOINT=${S3_ENDPOINT}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY}
+      - S3_SECRET_KEY=${S3_SECRET_KEY}
+      - S3_BUCKET=${S3_BUCKET}
+      - INTAKE_API_KEY=${INTAKE_API_KEY}
+      - MAX_BATCH_IMAGES=100
+      - MAX_FILE_SIZE_MB=50
+      - ALLOWED_EXTENSIONS=.md,.pdf,.png,.jpg,.jpeg,.tiff,.xlsx,.xls
+      - LOG_LEVEL=INFO
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    # No ports exposed - internal only via service name
+    # No depends_on - n8n workflow will wait for healthcheck
