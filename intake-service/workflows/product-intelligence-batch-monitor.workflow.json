@@ -1,0 +1,1822 @@
+{
+  "name": "Product Intelligence - Batch Scan, Retry & Status Monitor",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      },
+      "id": "42e22869-f9ed-5b1f-9ab5-dd9f77ea711f",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "245dec57-b1ef-5793-a0c7-4e3269de0e3f",
+              "name": "intake_base_url",
+              "value": "http://intake:8000",
+              "type": "string"
+            },
+            {
+              "id": "b562cf65-1f69-52ec-9a47-97945c3b19ac",
+              "name": "n8n_base_url",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "38738d8d-87b3-5036-a352-d18465c6e7b8",
+              "name": "notify_to",
+              "value": "engrabdalasad@gmail.com",
+              "type": "string"
+            },
+            {
+              "id": "03e9dcf5-953b-5926-8029-9981604210d2",
+              "name": "notify_from",
+              "value": "schneiderneil392@gmail.com",
+              "type": "string"
+            },
+            {
+              "id": "29137879-fc7e-57a6-b04e-df86dc68e85a",
+              "name": "notify_since",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "61272516-9271-5392-8e3c-6eb12d0e690d",
+              "name": "pending_grace_minutes",
+              "value": 10,
+              "type": "number"
+            },
+            {
+              "id": "ef29e7d7-ba73-5ffa-ba0e-88e276abbac1",
+              "name": "stale_processing_minutes",
+              "value": 30,
+              "type": "number"
+            },
+            {
+              "id": "9536f67a-f0d3-5f46-86e6-f1a64fe601a3",
+              "name": "lock_ttl_minutes",
+              "value": 25,
+              "type": "number"
+            }
+          ]
+        },
+        "includeOtherFields": false,
+        "options": {}
+      },
+      "id": "99d40685-bd30-5093-83b1-81cfb12d2892",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        250,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- shared helpers (prepended to every Code node by the generator) ----\nconst short = (v, n = 200) => String(v == null ? '' : v).replace(/\\s+/g, ' ').slice(0, n);\nconst hash = (s) => { let h = 5381; for (const c of String(s)) h = ((h * 33) ^ c.charCodeAt(0)) >>> 0; return h.toString(36); };\n// Service timestamps are naive ISO strings; they are treated as UTC. Date-only values are midnight UTC.\nconst parseTs = (s) => {\n  if (!s) return null;\n  let t = String(s).trim();\n  if (/^\\d{4}-\\d{2}-\\d{2}$/.test(t)) t += 'T00:00:00Z';\n  else if (!/(Z|[+-]\\d{2}:?\\d{2})$/i.test(t)) t += 'Z';\n  const ms = Date.parse(t);\n  return Number.isNaN(ms) ? null : ms;\n};\nconst minutesSince = (s) => { const ms = parseTs(s); return ms === null ? null : (Date.now() - ms) / 60000; };\nconst pkt = (ms) => new Date(ms).toLocaleString('en-GB', { timeZone: 'Asia/Karachi', hour12: false }) + ' PKT';\nconst stamp = () => { const n = Date.now(); return new Date(n).toISOString() + ' (UTC) / ' + pkt(n); };\n// Normalizes an HTTP node result: fullResponse item, or the error item from onError: continueRegularOutput.\nconst unwrap = (r) => {\n  if (r && r.error) {\n    const msg = String((r.error && r.error.message) || r.error || '');\n    const lead = msg.match(/^\\s*(\\d{3})\\b/);\n    const code = Number((r.error && r.error.httpCode) || (lead && lead[1]) || 0);\n    return { ok: false, status: code, body: null, err: short(msg) };\n  }\n  if (r && typeof r.statusCode === 'number') {\n    const ok = r.statusCode >= 200 && r.statusCode < 300;\n    const d = r.body && typeof r.body === 'object' ? r.body.detail : null;\n    return { ok, status: r.statusCode, body: r.body, err: ok ? null : 'HTTP ' + r.statusCode + (d ? ': ' + short(typeof d === 'string' ? d : JSON.stringify(d)) : '') };\n  }\n  return { ok: false, status: 0, body: null, err: 'unrecognized response shape' };\n};\nconst mkResult = (ctx, o) => ({\n  run_id: String(ctx.run_id), batch_id: ctx.batch_id || null,\n  log_kind: o.kind || 'action', log_action: o.action, log_outcome: o.outcome,\n  log_detail: short(o.detail || '', 300), notifications: o.notifications || [],\n});\nconst note = (type, key, batchId, jobId, subject, lines) => ({\n  event_type: type, event_key: key, batch_id: batchId || null, job_id: jobId || null,\n  subject: '[Product Intelligence] ' + subject,\n  text: lines.filter((x) => x !== null && x !== undefined && x !== '').join('\\n'),\n});\nconst refLines = (cfg, batchId) => [\n  '',\n  'Investigate:',\n  batchId ? '  Job status: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/status' : null,\n  batchId ? '  Unmatched images: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/image-matches' : null,\n  cfg.n8n_base_url ? '  n8n execution: ' + cfg.n8n_base_url + '/workflow/' + $workflow.id + '/executions/' + $execution.id\n                   : '  n8n execution id: ' + $execution.id,\n  'Time: ' + stamp(),\n];\nconst countLine = (b) => 'Counts: files=' + b.total_files + ', images=' + b.total_images + ', products=' + b.total_products;\n// ---- end helpers ----\n\n// Validate Config - Code node (all items). Fails loudly before any request is made.\nconst c = $input.first().json;\nconst errs = [];\nconst url = String(c.intake_base_url || '');\nif (!/^https?:\\/\\/[^\\s/]+(:\\d+)?(\\/\\S*)?$/.test(url)) errs.push('intake_base_url must be an http(s) URL');\nif (url.endsWith('/')) errs.push('intake_base_url must not end with \"/\"');\nconst mail = /^[^\\s@,]+@[^\\s@,]+\\.[^\\s@,]+$/;\nconst to = String(c.notify_to || '').split(',').map((s) => s.trim()).filter(Boolean);\nif (!to.length || !to.every((a) => mail.test(a))) errs.push('notify_to must be one or more valid email addresses');\nif (!mail.test(String(c.notify_from || '').trim())) errs.push('notify_from must be a valid email address');\nconst since = parseTs(c.notify_since);\nif (since === null) errs.push('notify_since must be an ISO date (e.g. 2026-10-19 or 2026-10-19T00:00:00Z, UTC)');\nconst nz = (k, min, max) => { const v = Number(c[k]); if (!Number.isFinite(v) || v < min || v > max) errs.push(k + ' must be a number between ' + min + ' and ' + max); };\nnz('pending_grace_minutes', 0, 120);\nnz('stale_processing_minutes', 1, 1440);\nnz('lock_ttl_minutes', 1, 60);\nif (c.n8n_base_url && !/^https?:\\/\\/\\S+$/.test(String(c.n8n_base_url))) errs.push('n8n_base_url must be an http(s) URL or empty');\nif (errs.length) throw new Error('Config invalid: ' + errs.join('; '));\nreturn [{ json: { ...c, notify_to: to.join(', '), notify_from: String(c.notify_from).trim(), notify_since_ms: since } }];\n"
+      },
+      "id": "913c3615-0067-5fa3-84ba-2bcad5ec55be",
+      "name": "Validate Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        500,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "pi_run_lock"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "lock_name",
+              "condition": "eq",
+              "keyValue": "product_intelligence_batch_monitor"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "0788a1cc-9ad9-5300-9446-940a41f29dd7",
+      "name": "Read Run Lock",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        750,
+        0
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- shared helpers (prepended to every Code node by the generator) ----\nconst short = (v, n = 200) => String(v == null ? '' : v).replace(/\\s+/g, ' ').slice(0, n);\nconst hash = (s) => { let h = 5381; for (const c of String(s)) h = ((h * 33) ^ c.charCodeAt(0)) >>> 0; return h.toString(36); };\n// Service timestamps are naive ISO strings; they are treated as UTC. Date-only values are midnight UTC.\nconst parseTs = (s) => {\n  if (!s) return null;\n  let t = String(s).trim();\n  if (/^\\d{4}-\\d{2}-\\d{2}$/.test(t)) t += 'T00:00:00Z';\n  else if (!/(Z|[+-]\\d{2}:?\\d{2})$/i.test(t)) t += 'Z';\n  const ms = Date.parse(t);\n  return Number.isNaN(ms) ? null : ms;\n};\nconst minutesSince = (s) => { const ms = parseTs(s); return ms === null ? null : (Date.now() - ms) / 60000; };\nconst pkt = (ms) => new Date(ms).toLocaleString('en-GB', { timeZone: 'Asia/Karachi', hour12: false }) + ' PKT';\nconst stamp = () => { const n = Date.now(); return new Date(n).toISOString() + ' (UTC) / ' + pkt(n); };\n// Normalizes an HTTP node result: fullResponse item, or the error item from onError: continueRegularOutput.\nconst unwrap = (r) => {\n  if (r && r.error) {\n    const msg = String((r.error && r.error.message) || r.error || '');\n    const lead = msg.match(/^\\s*(\\d{3})\\b/);\n    const code = Number((r.error && r.error.httpCode) || (lead && lead[1]) || 0);\n    return { ok: false, status: code, body: null, err: short(msg) };\n  }\n  if (r && typeof r.statusCode === 'number') {\n    const ok = r.statusCode >= 200 && r.statusCode < 300;\n    const d = r.body && typeof r.body === 'object' ? r.body.detail : null;\n    return { ok, status: r.statusCode, body: r.body, err: ok ? null : 'HTTP ' + r.statusCode + (d ? ': ' + short(typeof d === 'string' ? d : JSON.stringify(d)) : '') };\n  }\n  return { ok: false, status: 0, body: null, err: 'unrecognized response shape' };\n};\nconst mkResult = (ctx, o) => ({\n  run_id: String(ctx.run_id), batch_id: ctx.batch_id || null,\n  log_kind: o.kind || 'action', log_action: o.action, log_outcome: o.outcome,\n  log_detail: short(o.detail || '', 300), notifications: o.notifications || [],\n});\nconst note = (type, key, batchId, jobId, subject, lines) => ({\n  event_type: type, event_key: key, batch_id: batchId || null, job_id: jobId || null,\n  subject: '[Product Intelligence] ' + subject,\n  text: lines.filter((x) => x !== null && x !== undefined && x !== '').join('\\n'),\n});\nconst refLines = (cfg, batchId) => [\n  '',\n  'Investigate:',\n  batchId ? '  Job status: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/status' : null,\n  batchId ? '  Unmatched images: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/image-matches' : null,\n  cfg.n8n_base_url ? '  n8n execution: ' + cfg.n8n_base_url + '/workflow/' + $workflow.id + '/executions/' + $execution.id\n                   : '  n8n execution id: ' + $execution.id,\n  'Time: ' + stamp(),\n];\nconst countLine = (b) => 'Counts: files=' + b.total_files + ', images=' + b.total_images + ', products=' + b.total_products;\n// ---- end helpers ----\n\n// Evaluate Lock - Code node (all items). Input: 0 or 1 row from \"Read Run Lock\" (alwaysOutputData gives {} when none).\nconst cfg = $('Validate Config').first().json;\nconst row = ($input.first() && $input.first().json) || {};\nconst now = Date.now();\nconst exp = parseTs(row.expires_at);\nconst held = Boolean(row.lock_name) && exp !== null && exp > now;\nconst runId = String($execution.id);\nconst res = mkResult({ run_id: runId }, {\n  kind: 'run', action: 'lock',\n  outcome: held ? 'skipped_previous_run_active' : 'acquired',\n  detail: held ? 'Lock held by run ' + (row.run_id || '?') + ' until ' + row.expires_at : 'Lock acquired',\n});\nreturn [{ json: { ...res, lock_held: held, new_expires_at: new Date(now + cfg.lock_ttl_minutes * 60000).toISOString() } }];\n"
+      },
+      "id": "6b7ceddb-2baf-5d4e-9f9b-87fb6a2afe33",
+      "name": "Evaluate Lock",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1000,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "fec9a9cd-ae60-5116-8a43-04d9e0432173",
+              "leftValue": "={{ $json.lock_held }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "90096302-a2bd-5e65-9714-e0c7a7e4f687",
+      "name": "Lock Held?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1250,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "pi_run_lock"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "lock_name",
+              "condition": "eq",
+              "keyValue": "product_intelligence_batch_monitor"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "lock_name": "product_intelligence_batch_monitor",
+            "run_id": "={{ $json.run_id }}",
+            "expires_at": "={{ $json.new_expires_at }}"
+          },
+          "matchingColumns": [
+            "lock_name"
+          ],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "d88315b8-5b2f-5e55-a1ed-cc779b616acc",
+      "name": "Acquire Run Lock",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        1500,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Validate Config').first().json.intake_base_url }}/api/v1/scan",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"force\": false}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "717d38a9-bc4c-5ec0-aa8f-8176ffc624bd",
+      "name": "Scan for Batches",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1750,
+        0
+      ],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- shared helpers (prepended to every Code node by the generator) ----\nconst short = (v, n = 200) => String(v == null ? '' : v).replace(/\\s+/g, ' ').slice(0, n);\nconst hash = (s) => { let h = 5381; for (const c of String(s)) h = ((h * 33) ^ c.charCodeAt(0)) >>> 0; return h.toString(36); };\n// Service timestamps are naive ISO strings; they are treated as UTC. Date-only values are midnight UTC.\nconst parseTs = (s) => {\n  if (!s) return null;\n  let t = String(s).trim();\n  if (/^\\d{4}-\\d{2}-\\d{2}$/.test(t)) t += 'T00:00:00Z';\n  else if (!/(Z|[+-]\\d{2}:?\\d{2})$/i.test(t)) t += 'Z';\n  const ms = Date.parse(t);\n  return Number.isNaN(ms) ? null : ms;\n};\nconst minutesSince = (s) => { const ms = parseTs(s); return ms === null ? null : (Date.now() - ms) / 60000; };\nconst pkt = (ms) => new Date(ms).toLocaleString('en-GB', { timeZone: 'Asia/Karachi', hour12: false }) + ' PKT';\nconst stamp = () => { const n = Date.now(); return new Date(n).toISOString() + ' (UTC) / ' + pkt(n); };\n// Normalizes an HTTP node result: fullResponse item, or the error item from onError: continueRegularOutput.\nconst unwrap = (r) => {\n  if (r && r.error) {\n    const msg = String((r.error && r.error.message) || r.error || '');\n    const lead = msg.match(/^\\s*(\\d{3})\\b/);\n    const code = Number((r.error && r.error.httpCode) || (lead && lead[1]) || 0);\n    return { ok: false, status: code, body: null, err: short(msg) };\n  }\n  if (r && typeof r.statusCode === 'number') {\n    const ok = r.statusCode >= 200 && r.statusCode < 300;\n    const d = r.body && typeof r.body === 'object' ? r.body.detail : null;\n    return { ok, status: r.statusCode, body: r.body, err: ok ? null : 'HTTP ' + r.statusCode + (d ? ': ' + short(typeof d === 'string' ? d : JSON.stringify(d)) : '') };\n  }\n  return { ok: false, status: 0, body: null, err: 'unrecognized response shape' };\n};\nconst mkResult = (ctx, o) => ({\n  run_id: String(ctx.run_id), batch_id: ctx.batch_id || null,\n  log_kind: o.kind || 'action', log_action: o.action, log_outcome: o.outcome,\n  log_detail: short(o.detail || '', 300), notifications: o.notifications || [],\n});\nconst note = (type, key, batchId, jobId, subject, lines) => ({\n  event_type: type, event_key: key, batch_id: batchId || null, job_id: jobId || null,\n  subject: '[Product Intelligence] ' + subject,\n  text: lines.filter((x) => x !== null && x !== undefined && x !== '').join('\\n'),\n});\nconst refLines = (cfg, batchId) => [\n  '',\n  'Investigate:',\n  batchId ? '  Job status: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/status' : null,\n  batchId ? '  Unmatched images: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/image-matches' : null,\n  cfg.n8n_base_url ? '  n8n execution: ' + cfg.n8n_base_url + '/workflow/' + $workflow.id + '/executions/' + $execution.id\n                   : '  n8n execution id: ' + $execution.id,\n  'Time: ' + stamp(),\n];\nconst countLine = (b) => 'Counts: files=' + b.total_files + ', images=' + b.total_images + ', products=' + b.total_products;\n// ---- end helpers ----\n\n// Validate Scan Response - Code node, \"Run Once for All Items\"\n// Input: one item from \"Scan for Batches\" (fullResponse + neverError, or an error item).\n// Output: exactly one item with scan_* fields. Never throws; auth failure is flagged for the IF node.\nconst first = $input.first();\nconst r = first ? first.json : {};\nconst out = {\n  scan_ok: false,\n  scan_error: null,\n  scan_auth_failure: false,\n  batches_found: null,\n  batches_queued: 0,\n  batches_skipped: 0,\n};\n\nif (r.error) {\n  // Error item from the HTTP node (onError: continueRegularOutput). Status is in httpCode or leads the message (\"401 - ...\").\n  const msg = String((r.error && r.error.message) || r.error || '');\n  const lead = msg.match(/^\\s*(\\d{3})\\b/);\n  const code = Number((r.error && r.error.httpCode) || (lead && lead[1]) || 0);\n  if (code === 401 || code === 403) {\n    out.scan_auth_failure = true;\n    out.scan_error = 'Intake API rejected credentials (HTTP ' + code + ')';\n  } else {\n    out.scan_error = 'Scan request failed: ' + short(msg);\n  }\n} else if (r.statusCode === 401 || r.statusCode === 403) {\n  out.scan_auth_failure = true;\n  out.scan_error = 'Intake API rejected credentials (HTTP ' + r.statusCode + ')';\n} else if (typeof r.statusCode !== 'number' || r.statusCode >= 400) {\n  const d = r.body && r.body.detail;\n  out.scan_error = 'Scan returned HTTP ' + r.statusCode +\n    (d ? ': ' + short(typeof d === 'string' ? d : JSON.stringify(d)) : '');\n} else {\n  const b = r.body;\n  if (b && typeof b === 'object' && Number.isInteger(b.batches_found) &&\n      Array.isArray(b.batches_queued) && Array.isArray(b.batches_skipped)) {\n    out.scan_ok = true;\n    out.batches_found = b.batches_found;\n    out.batches_queued = b.batches_queued.length;\n    out.batches_skipped = b.batches_skipped.length;\n  } else {\n    out.scan_error = 'Scan response malformed (expected batches_found, batches_queued, batches_skipped)';\n  }\n}\nreturn [{ json: out }];\n"
+      },
+      "id": "5b01e188-547a-52aa-acf2-98e944d4f560",
+      "name": "Validate Scan Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "7f4fa9d8-91c4-54c9-9296-511dbfce63f9",
+              "leftValue": "={{ $json.scan_auth_failure }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "3a86cf76-798d-5a55-8993-decaadaba615",
+      "name": "Scan Auth Failure?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2250,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "errorMessage": "={{ $json.scan_error }}"
+      },
+      "id": "b5efde01-b682-569b-b014-f034519fafa5",
+      "name": "Stop: Intake Auth Failure",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        2500,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- shared helpers (prepended to every Code node by the generator) ----\nconst short = (v, n = 200) => String(v == null ? '' : v).replace(/\\s+/g, ' ').slice(0, n);\nconst hash = (s) => { let h = 5381; for (const c of String(s)) h = ((h * 33) ^ c.charCodeAt(0)) >>> 0; return h.toString(36); };\n// Service timestamps are naive ISO strings; they are treated as UTC. Date-only values are midnight UTC.\nconst parseTs = (s) => {\n  if (!s) return null;\n  let t = String(s).trim();\n  if (/^\\d{4}-\\d{2}-\\d{2}$/.test(t)) t += 'T00:00:00Z';\n  else if (!/(Z|[+-]\\d{2}:?\\d{2})$/i.test(t)) t += 'Z';\n  const ms = Date.parse(t);\n  return Number.isNaN(ms) ? null : ms;\n};\nconst minutesSince = (s) => { const ms = parseTs(s); return ms === null ? null : (Date.now() - ms) / 60000; };\nconst pkt = (ms) => new Date(ms).toLocaleString('en-GB', { timeZone: 'Asia/Karachi', hour12: false }) + ' PKT';\nconst stamp = () => { const n = Date.now(); return new Date(n).toISOString() + ' (UTC) / ' + pkt(n); };\n// Normalizes an HTTP node result: fullResponse item, or the error item from onError: continueRegularOutput.\nconst unwrap = (r) => {\n  if (r && r.error) {\n    const msg = String((r.error && r.error.message) || r.error || '');\n    const lead = msg.match(/^\\s*(\\d{3})\\b/);\n    const code = Number((r.error && r.error.httpCode) || (lead && lead[1]) || 0);\n    return { ok: false, status: code, body: null, err: short(msg) };\n  }\n  if (r && typeof r.statusCode === 'number') {\n    const ok = r.statusCode >= 200 && r.statusCode < 300;\n    const d = r.body && typeof r.body === 'object' ? r.body.detail : null;\n    return { ok, status: r.statusCode, body: r.body, err: ok ? null : 'HTTP ' + r.statusCode + (d ? ': ' + short(typeof d === 'string' ? d : JSON.stringify(d)) : '') };\n  }\n  return { ok: false, status: 0, body: null, err: 'unrecognized response shape' };\n};\nconst mkResult = (ctx, o) => ({\n  run_id: String(ctx.run_id), batch_id: ctx.batch_id || null,\n  log_kind: o.kind || 'action', log_action: o.action, log_outcome: o.outcome,\n  log_detail: short(o.detail || '', 300), notifications: o.notifications || [],\n});\nconst note = (type, key, batchId, jobId, subject, lines) => ({\n  event_type: type, event_key: key, batch_id: batchId || null, job_id: jobId || null,\n  subject: '[Product Intelligence] ' + subject,\n  text: lines.filter((x) => x !== null && x !== undefined && x !== '').join('\\n'),\n});\nconst refLines = (cfg, batchId) => [\n  '',\n  'Investigate:',\n  batchId ? '  Job status: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/status' : null,\n  batchId ? '  Unmatched images: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/image-matches' : null,\n  cfg.n8n_base_url ? '  n8n execution: ' + cfg.n8n_base_url + '/workflow/' + $workflow.id + '/executions/' + $execution.id\n                   : '  n8n execution id: ' + $execution.id,\n  'Time: ' + stamp(),\n];\nconst countLine = (b) => 'Counts: files=' + b.total_files + ', images=' + b.total_images + ', products=' + b.total_products;\n// ---- end helpers ----\n\n// Build Scan Alert - Code node (all items). Emits nothing when the scan succeeded.\nconst s = $input.first().json;\nif (s.scan_ok) return [];\nconst cfg = $('Validate Config').first().json;\nconst d = new Date();\nconst bucket = d.toISOString().slice(0, 10) + ':' + Math.floor(d.getUTCHours() / 6); // at most one alert per 6h\nconst n = note('scan_failed', 'scan_failed:' + bucket, null, null, 'Scan failed (existing batches still checked)', [\n  'The intake scan did not complete, so new packages may not have been registered.',\n  'Existing batches were still listed and routed in this run.',\n  'Error: ' + short(s.scan_error, 300),\n  ...refLines(cfg, null),\n]);\nconst res = mkResult({ run_id: $execution.id }, { kind: 'alert', action: 'scan', outcome: 'scan_failed', detail: s.scan_error, notifications: [n] });\nreturn [{ json: res }];\n"
+      },
+      "id": "7dc033ee-11c8-52ec-a92a-a9d20e420437",
+      "name": "Build Scan Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2500,
+        170
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Validate Config').first().json.intake_base_url }}/api/v1/batches",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "limit",
+              "value": "50"
+            },
+            {
+              "name": "offset",
+              "value": "0"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "json"
+            }
+          },
+          "pagination": {
+            "pagination": {
+              "parameters": {
+                "parameters": [
+                  {
+                    "type": "qs",
+                    "name": "offset",
+                    "value": "={{ $pageCount * 50 }}"
+                  }
+                ]
+              },
+              "paginationMode": "updateAParameterInEachRequest",
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !Array.isArray($response.body) || $response.body.length < 50 }}",
+              "limitPagesFetched": true,
+              "maxRequests": 20
+            }
+          }
+        }
+      },
+      "id": "677818bd-c6b9-5dc3-b72f-cdb539023b9a",
+      "name": "List Batches",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2500,
+        340
+      ],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- shared helpers (prepended to every Code node by the generator) ----\nconst short = (v, n = 200) => String(v == null ? '' : v).replace(/\\s+/g, ' ').slice(0, n);\nconst hash = (s) => { let h = 5381; for (const c of String(s)) h = ((h * 33) ^ c.charCodeAt(0)) >>> 0; return h.toString(36); };\n// Service timestamps are naive ISO strings; they are treated as UTC. Date-only values are midnight UTC.\nconst parseTs = (s) => {\n  if (!s) return null;\n  let t = String(s).trim();\n  if (/^\\d{4}-\\d{2}-\\d{2}$/.test(t)) t += 'T00:00:00Z';\n  else if (!/(Z|[+-]\\d{2}:?\\d{2})$/i.test(t)) t += 'Z';\n  const ms = Date.parse(t);\n  return Number.isNaN(ms) ? null : ms;\n};\nconst minutesSince = (s) => { const ms = parseTs(s); return ms === null ? null : (Date.now() - ms) / 60000; };\nconst pkt = (ms) => new Date(ms).toLocaleString('en-GB', { timeZone: 'Asia/Karachi', hour12: false }) + ' PKT';\nconst stamp = () => { const n = Date.now(); return new Date(n).toISOString() + ' (UTC) / ' + pkt(n); };\n// Normalizes an HTTP node result: fullResponse item, or the error item from onError: continueRegularOutput.\nconst unwrap = (r) => {\n  if (r && r.error) {\n    const msg = String((r.error && r.error.message) || r.error || '');\n    const lead = msg.match(/^\\s*(\\d{3})\\b/);\n    const code = Number((r.error && r.error.httpCode) || (lead && lead[1]) || 0);\n    return { ok: false, status: code, body: null, err: short(msg) };\n  }\n  if (r && typeof r.statusCode === 'number') {\n    const ok = r.statusCode >= 200 && r.statusCode < 300;\n    const d = r.body && typeof r.body === 'object' ? r.body.detail : null;\n    return { ok, status: r.statusCode, body: r.body, err: ok ? null : 'HTTP ' + r.statusCode + (d ? ': ' + short(typeof d === 'string' ? d : JSON.stringify(d)) : '') };\n  }\n  return { ok: false, status: 0, body: null, err: 'unrecognized response shape' };\n};\nconst mkResult = (ctx, o) => ({\n  run_id: String(ctx.run_id), batch_id: ctx.batch_id || null,\n  log_kind: o.kind || 'action', log_action: o.action, log_outcome: o.outcome,\n  log_detail: short(o.detail || '', 300), notifications: o.notifications || [],\n});\nconst note = (type, key, batchId, jobId, subject, lines) => ({\n  event_type: type, event_key: key, batch_id: batchId || null, job_id: jobId || null,\n  subject: '[Product Intelligence] ' + subject,\n  text: lines.filter((x) => x !== null && x !== undefined && x !== '').join('\\n'),\n});\nconst refLines = (cfg, batchId) => [\n  '',\n  'Investigate:',\n  batchId ? '  Job status: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/status' : null,\n  batchId ? '  Unmatched images: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/image-matches' : null,\n  cfg.n8n_base_url ? '  n8n execution: ' + cfg.n8n_base_url + '/workflow/' + $workflow.id + '/executions/' + $execution.id\n                   : '  n8n execution id: ' + $execution.id,\n  'Time: ' + stamp(),\n];\nconst countLine = (b) => 'Counts: files=' + b.total_files + ', images=' + b.total_images + ', products=' + b.total_products;\n// ---- end helpers ----\n\n// Summarize Run - Code node (all items). One log row per run, even when zero batches were listed.\nconst cfg = $('Validate Config').first().json;\nconst scan = $('Validate Scan Response').first().json;\nconst pages = $input.all();\nlet records = 0;\nfor (const p of pages) { const b = p.json && p.json.body; if (Array.isArray(b)) records += b.length; }\nconst last = pages.length ? pages[pages.length - 1].json.body : [];\nconst truncated = pages.length >= 20 && Array.isArray(last) && last.length === 50;\nconst notifications = [];\nif (truncated) {\n  notifications.push(note('list_truncated', 'list_truncated:' + new Date().toISOString().slice(0, 10), null, null,\n    'Batch list hit the page limit', ['Listed 1000 batches (20 pages x 50) and more may exist.', 'Older batches beyond that were not checked in this run.', ...refLines(cfg, null)]));\n}\nconst detail = 'pages=' + pages.length + ' records=' + records + ' truncated=' + truncated +\n  ' scan_ok=' + scan.scan_ok + ' queued=' + scan.batches_queued + ' skipped=' + scan.batches_skipped;\nreturn [{ json: mkResult({ run_id: $execution.id }, { kind: 'run', action: 'list', outcome: records === 0 ? 'zero_batches' : 'ok', detail, notifications }) }];\n"
+      },
+      "id": "a8d9989b-f71b-5615-94ee-539b30b9deb0",
+      "name": "Summarize Run",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2750,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- shared helpers (prepended to every Code node by the generator) ----\nconst short = (v, n = 200) => String(v == null ? '' : v).replace(/\\s+/g, ' ').slice(0, n);\nconst hash = (s) => { let h = 5381; for (const c of String(s)) h = ((h * 33) ^ c.charCodeAt(0)) >>> 0; return h.toString(36); };\n// Service timestamps are naive ISO strings; they are treated as UTC. Date-only values are midnight UTC.\nconst parseTs = (s) => {\n  if (!s) return null;\n  let t = String(s).trim();\n  if (/^\\d{4}-\\d{2}-\\d{2}$/.test(t)) t += 'T00:00:00Z';\n  else if (!/(Z|[+-]\\d{2}:?\\d{2})$/i.test(t)) t += 'Z';\n  const ms = Date.parse(t);\n  return Number.isNaN(ms) ? null : ms;\n};\nconst minutesSince = (s) => { const ms = parseTs(s); return ms === null ? null : (Date.now() - ms) / 60000; };\nconst pkt = (ms) => new Date(ms).toLocaleString('en-GB', { timeZone: 'Asia/Karachi', hour12: false }) + ' PKT';\nconst stamp = () => { const n = Date.now(); return new Date(n).toISOString() + ' (UTC) / ' + pkt(n); };\n// Normalizes an HTTP node result: fullResponse item, or the error item from onError: continueRegularOutput.\nconst unwrap = (r) => {\n  if (r && r.error) {\n    const msg = String((r.error && r.error.message) || r.error || '');\n    const lead = msg.match(/^\\s*(\\d{3})\\b/);\n    const code = Number((r.error && r.error.httpCode) || (lead && lead[1]) || 0);\n    return { ok: false, status: code, body: null, err: short(msg) };\n  }\n  if (r && typeof r.statusCode === 'number') {\n    const ok = r.statusCode >= 200 && r.statusCode < 300;\n    const d = r.body && typeof r.body === 'object' ? r.body.detail : null;\n    return { ok, status: r.statusCode, body: r.body, err: ok ? null : 'HTTP ' + r.statusCode + (d ? ': ' + short(typeof d === 'string' ? d : JSON.stringify(d)) : '') };\n  }\n  return { ok: false, status: 0, body: null, err: 'unrecognized response shape' };\n};\nconst mkResult = (ctx, o) => ({\n  run_id: String(ctx.run_id), batch_id: ctx.batch_id || null,\n  log_kind: o.kind || 'action', log_action: o.action, log_outcome: o.outcome,\n  log_detail: short(o.detail || '', 300), notifications: o.notifications || [],\n});\nconst note = (type, key, batchId, jobId, subject, lines) => ({\n  event_type: type, event_key: key, batch_id: batchId || null, job_id: jobId || null,\n  subject: '[Product Intelligence] ' + subject,\n  text: lines.filter((x) => x !== null && x !== undefined && x !== '').join('\\n'),\n});\nconst refLines = (cfg, batchId) => [\n  '',\n  'Investigate:',\n  batchId ? '  Job status: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/status' : null,\n  batchId ? '  Unmatched images: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/image-matches' : null,\n  cfg.n8n_base_url ? '  n8n execution: ' + cfg.n8n_base_url + '/workflow/' + $workflow.id + '/executions/' + $execution.id\n                   : '  n8n execution id: ' + $execution.id,\n  'Time: ' + stamp(),\n];\nconst countLine = (b) => 'Counts: files=' + b.total_files + ', images=' + b.total_images + ', products=' + b.total_products;\n// ---- end helpers ----\n\n// Normalize & Validate Batches - Code node, \"Run Once for All Items\"\n// Input: one item per page from \"List Batches\" (fullResponse + neverError).\n// Output: one item per valid-or-invalid batch record (deduplicated by batch_id).\n// Fails loudly (throws) on auth errors, HTTP errors or malformed pages so the run is never \"green but blind\".\n// Zero batches -> returns [] (not an error).\nconst PAGE_SIZE = 50;\nconst MAX_PAGES = 20;\nconst KNOWN = ['discovered', 'processing', 'completed', 'failed', 'awaiting_review'];\nconst SAFE_ID = /^[A-Za-z0-9_-]{1,64}$/;\nconst num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);\nconst str = (v) => (typeof v === 'string' && v.trim() !== '' ? v.trim() : null);\n\nconst scan = $('Validate Scan Response').first().json;\nconst cfg = $('Validate Config').first().json;\nconst runId = String($execution.id);\nconst pages = $input.all();\nconst records = [];\nlet lastPageLen = 0;\n\npages.forEach((p, i) => {\n  const r = p.json || {};\n  if (r.error) throw new Error('Listing batches failed on page ' + (i + 1) + ': ' + short(r.error.message || r.error));\n  if (r.statusCode === 401 || r.statusCode === 403) {\n    throw new Error('Intake API rejected credentials (HTTP ' + r.statusCode + ') while listing batches');\n  }\n  if (typeof r.statusCode !== 'number' || r.statusCode >= 400) {\n    throw new Error('Listing batches returned HTTP ' + r.statusCode + ' on page ' + (i + 1));\n  }\n  if (!Array.isArray(r.body)) {\n    throw new Error('Malformed batch list on page ' + (i + 1) + ': expected a JSON array');\n  }\n  lastPageLen = r.body.length;\n  records.push(...r.body);\n});\n\nconst truncated = pages.length >= MAX_PAGES && lastPageLen === PAGE_SIZE;\nconst seen = new Set();\nconst out = [];\n\nfor (const rec of records) {\n  let reason = null;\n  if (!rec || typeof rec !== 'object' || Array.isArray(rec)) reason = 'record is not an object';\n  const id = rec && typeof rec === 'object' ? str(rec.batch_id) : null;\n  if (!reason && !id) reason = 'missing batch_id';\n  if (!reason && !SAFE_ID.test(id)) reason = 'batch_id has unsafe characters';\n  const status = rec && typeof rec === 'object' ? str(rec.status) : null;\n  if (!reason && !status) reason = 'missing status';\n\n  if (id && seen.has(id)) continue; // newest-first list: keep first occurrence\n  if (id) seen.add(id);\n\n  const valid = reason === null;\n  const known = valid && KNOWN.includes(status);\n  const route = !valid ? '__invalid__' : (known ? status : '__unknown__');\n  const err = rec && typeof rec === 'object' ? str(rec.error_message) : null;\n  const startedAt = rec && typeof rec === 'object' ? str(rec.started_at) : null;\n  const completedAt = rec && typeof rec === 'object' ? str(rec.completed_at) : null;\n  const when = completedAt || startedAt || 'na';\n  // Durable dedup key per event. 'discovered' keys are unique per run, so they never block processing.\n  const keys = {\n    discovered: 'process:' + id + ':' + runId,\n    processing: 'stale_processing:' + id + ':' + (startedAt || 'na'),\n    completed: 'batch_completed:' + id + ':' + when,\n    failed: 'batch_dead_lettered:' + id + ':' + when + ':' + hash(err || ''),\n    awaiting_review: 'review_required:' + id + ':' + when,\n    __unknown__: 'unknown_status:' + id + ':' + status,\n    __invalid__: 'invalid_record:' + (id || 'na') + ':' + hash(String(reason)),\n  };\n  // History before notify_since is recorded as suppressed instead of emailed (terminal states only).\n  const evMs = parseTs(completedAt || startedAt);\n  const suppress = ['completed', 'failed', 'awaiting_review'].includes(route) && evMs !== null && evMs < cfg.notify_since_ms;\n  out.push({\n    json: {\n      batch_id: id,\n      status: status,\n      route_status: route,\n      event_key: keys[route],\n      suppress_history: suppress,\n      valid: valid,\n      invalid_reason: reason,\n      total_files: num(rec && rec.total_files),\n      total_images: num(rec && rec.total_images),\n      total_products: num(rec && rec.total_products),\n      error_message: err,\n      started_at: startedAt,\n      completed_at: completedAt,\n      run_id: runId,\n      scan_ok: scan.scan_ok,\n      scan_error: scan.scan_error,\n      list_truncated: truncated,\n    },\n  });\n}\nreturn out;\n"
+      },
+      "id": "67ea294e-47ec-5f58-a8e0-498cbbcd5aa9",
+      "name": "Normalize & Validate Batches",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2750,
+        170
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "rowNotExists",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "pi_notification_events"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "event_key",
+              "condition": "eq",
+              "keyValue": "={{ $json.event_key }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "c4ac993c-40e1-5152-b12f-0bc2488efd46",
+      "name": "Dedup Gate",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        3000,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "82087c59-bda2-52c6-89aa-6e41e7921cc3",
+              "leftValue": "={{ $json.suppress_history }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "607a2aba-af72-5298-9450-7894c204c9d6",
+      "name": "Historical Event?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        3250,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "insert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "pi_notification_events"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "event_key": "={{ $json.event_key }}",
+            "event_type": "={{ $json.route_status }}",
+            "batch_id": "={{ $json.batch_id }}",
+            "job_id": "",
+            "delivery": "suppressed_history",
+            "recipient": "",
+            "sent_at": "={{ new Date().toISOString() }}"
+          },
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "6c6b18d2-6b19-5401-8e8d-425b8a1963de",
+      "name": "Record Suppressed Event",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        3500,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "2465b6e2-a730-569e-92f2-907f7824cf88",
+                    "leftValue": "={{ $json.route_status }}",
+                    "rightValue": "discovered",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "discovered"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "e0d7056e-08b5-57bd-b205-d9496c5356a6",
+                    "leftValue": "={{ $json.route_status }}",
+                    "rightValue": "processing",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "processing"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "f0432e5a-6333-5cdb-b465-6dce8def96ba",
+                    "leftValue": "={{ $json.route_status }}",
+                    "rightValue": "completed",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "completed"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "8a8f6e76-7cd1-5c0b-8681-8919eaeb972a",
+                    "leftValue": "={{ $json.route_status }}",
+                    "rightValue": "failed",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "failed"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "bb3d0305-dab9-5f94-9e31-103372b24128",
+                    "leftValue": "={{ $json.route_status }}",
+                    "rightValue": "awaiting_review",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "awaiting_review"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "unknown"
+        }
+      },
+      "id": "6cc27bb6-b14b-5078-8c9c-21ff5feea0fe",
+      "name": "Route by Status",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        3500,
+        170
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Validate Config').first().json.intake_base_url }}/api/v1/batches/{{ encodeURIComponent($('Route by Status').item.json.batch_id) }}/status",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "json",
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "a4ffb800-8865-5935-a4c6-68161649fd8e",
+      "name": "Pre-flight Job Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3750,
+        0
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- shared helpers (prepended to every Code node by the generator) ----\nconst short = (v, n = 200) => String(v == null ? '' : v).replace(/\\s+/g, ' ').slice(0, n);\nconst hash = (s) => { let h = 5381; for (const c of String(s)) h = ((h * 33) ^ c.charCodeAt(0)) >>> 0; return h.toString(36); };\n// Service timestamps are naive ISO strings; they are treated as UTC. Date-only values are midnight UTC.\nconst parseTs = (s) => {\n  if (!s) return null;\n  let t = String(s).trim();\n  if (/^\\d{4}-\\d{2}-\\d{2}$/.test(t)) t += 'T00:00:00Z';\n  else if (!/(Z|[+-]\\d{2}:?\\d{2})$/i.test(t)) t += 'Z';\n  const ms = Date.parse(t);\n  return Number.isNaN(ms) ? null : ms;\n};\nconst minutesSince = (s) => { const ms = parseTs(s); return ms === null ? null : (Date.now() - ms) / 60000; };\nconst pkt = (ms) => new Date(ms).toLocaleString('en-GB', { timeZone: 'Asia/Karachi', hour12: false }) + ' PKT';\nconst stamp = () => { const n = Date.now(); return new Date(n).toISOString() + ' (UTC) / ' + pkt(n); };\n// Normalizes an HTTP node result: fullResponse item, or the error item from onError: continueRegularOutput.\nconst unwrap = (r) => {\n  if (r && r.error) {\n    const msg = String((r.error && r.error.message) || r.error || '');\n    const lead = msg.match(/^\\s*(\\d{3})\\b/);\n    const code = Number((r.error && r.error.httpCode) || (lead && lead[1]) || 0);\n    return { ok: false, status: code, body: null, err: short(msg) };\n  }\n  if (r && typeof r.statusCode === 'number') {\n    const ok = r.statusCode >= 200 && r.statusCode < 300;\n    const d = r.body && typeof r.body === 'object' ? r.body.detail : null;\n    return { ok, status: r.statusCode, body: r.body, err: ok ? null : 'HTTP ' + r.statusCode + (d ? ': ' + short(typeof d === 'string' ? d : JSON.stringify(d)) : '') };\n  }\n  return { ok: false, status: 0, body: null, err: 'unrecognized response shape' };\n};\nconst mkResult = (ctx, o) => ({\n  run_id: String(ctx.run_id), batch_id: ctx.batch_id || null,\n  log_kind: o.kind || 'action', log_action: o.action, log_outcome: o.outcome,\n  log_detail: short(o.detail || '', 300), notifications: o.notifications || [],\n});\nconst note = (type, key, batchId, jobId, subject, lines) => ({\n  event_type: type, event_key: key, batch_id: batchId || null, job_id: jobId || null,\n  subject: '[Product Intelligence] ' + subject,\n  text: lines.filter((x) => x !== null && x !== undefined && x !== '').join('\\n'),\n});\nconst refLines = (cfg, batchId) => [\n  '',\n  'Investigate:',\n  batchId ? '  Job status: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/status' : null,\n  batchId ? '  Unmatched images: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/image-matches' : null,\n  cfg.n8n_base_url ? '  n8n execution: ' + cfg.n8n_base_url + '/workflow/' + $workflow.id + '/executions/' + $execution.id\n                   : '  n8n execution id: ' + $execution.id,\n  'Time: ' + stamp(),\n];\nconst countLine = (b) => 'Counts: files=' + b.total_files + ', images=' + b.total_images + ', products=' + b.total_products;\n// ---- end helpers ----\n\n// Decide Process - Code node (each item). Input: pre-flight GET /status response (404 = no job yet).\n// Policy: process only when the service contract makes it safe. Never reprocess ambiguous or dead-lettered work.\nconst b = $('Route by Status').item.json;\nconst cfg = $('Validate Config').first().json;\nconst r = unwrap($json);\nconst ctx = { run_id: b.run_id, batch_id: b.batch_id };\nlet process = false, outcome, detail = '', notifications = [];\nconst manual = (why) => note('manual_attention', 'manual_attention:' + b.batch_id + ':' + (r.body && r.body.job_id), b.batch_id, r.body && r.body.job_id,\n  'Batch needs manual attention', ['Batch ' + b.batch_id + ' is \"discovered\" but was NOT sent for processing automatically.', 'Reason: ' + why, 'Latest job status: ' + (r.body && r.body.status),\n    'Job error: ' + short(r.body && r.body.error_message, 300), ...refLines(cfg, b.batch_id)]);\nif (r.status === 404) { process = true; outcome = 'eligible_new'; detail = 'No job exists yet'; }\nelse if (r.ok && r.body && typeof r.body === 'object') {\n  const js = r.body.status;\n  const age = minutesSince(r.body.started_at);\n  const dead = Boolean(r.body.result_summary && r.body.result_summary.dead_letter);\n  if (js === 'running') { outcome = 'skipped_running'; detail = 'Job already running'; }\n  else if (js === 'pending') {\n    if (age !== null && age < cfg.pending_grace_minutes) { outcome = 'skipped_recently_queued'; detail = 'Pending job queued ' + age.toFixed(1) + ' min ago'; }\n    else { process = true; outcome = 'eligible_retry'; detail = 'Pending job older than grace period (retry scheduled by service)'; }\n  } else if (js === 'failed' && dead) { outcome = 'skipped_dead_lettered'; detail = 'Dead-lettered job; not retried automatically'; notifications = [manual('latest job is dead-lettered')]; }\n  else if (js === 'completed') { outcome = 'skipped_ambiguous_completed_job'; detail = 'Batch discovered but latest job completed'; notifications = [manual('batch is \"discovered\" but its latest job is already completed')]; }\n  else { outcome = 'skipped_unknown_job_state'; detail = 'Latest job status: ' + js; notifications = [manual('unexpected latest job status \"' + js + '\"')]; }\n} else { outcome = 'skipped_preflight_uncertain'; detail = r.err || 'pre-flight check failed'; }\nconst res = mkResult(ctx, { action: 'preflight', outcome, detail, notifications });\nreturn { json: { ...res, process } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "624fe8c8-3153-5cda-8fdd-b856f26e1312",
+      "name": "Decide Process",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4000,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b11b56fb-59b7-510f-adca-42669bbb6e8e",
+              "leftValue": "={{ $json.process }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f0872687-3468-5345-8be2-cd01b576be01",
+      "name": "Eligible to Process?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        4250,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Validate Config').first().json.intake_base_url }}/api/v1/batches/{{ encodeURIComponent($json.batch_id) }}/process",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "json",
+              "neverError": true
+            }
+          },
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1000
+            }
+          }
+        }
+      },
+      "id": "7bd03fcf-52a3-590b-b9ce-9ede492eab26",
+      "name": "Process Batch",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4500,
+        0
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- shared helpers (prepended to every Code node by the generator) ----\nconst short = (v, n = 200) => String(v == null ? '' : v).replace(/\\s+/g, ' ').slice(0, n);\nconst hash = (s) => { let h = 5381; for (const c of String(s)) h = ((h * 33) ^ c.charCodeAt(0)) >>> 0; return h.toString(36); };\n// Service timestamps are naive ISO strings; they are treated as UTC. Date-only values are midnight UTC.\nconst parseTs = (s) => {\n  if (!s) return null;\n  let t = String(s).trim();\n  if (/^\\d{4}-\\d{2}-\\d{2}$/.test(t)) t += 'T00:00:00Z';\n  else if (!/(Z|[+-]\\d{2}:?\\d{2})$/i.test(t)) t += 'Z';\n  const ms = Date.parse(t);\n  return Number.isNaN(ms) ? null : ms;\n};\nconst minutesSince = (s) => { const ms = parseTs(s); return ms === null ? null : (Date.now() - ms) / 60000; };\nconst pkt = (ms) => new Date(ms).toLocaleString('en-GB', { timeZone: 'Asia/Karachi', hour12: false }) + ' PKT';\nconst stamp = () => { const n = Date.now(); return new Date(n).toISOString() + ' (UTC) / ' + pkt(n); };\n// Normalizes an HTTP node result: fullResponse item, or the error item from onError: continueRegularOutput.\nconst unwrap = (r) => {\n  if (r && r.error) {\n    const msg = String((r.error && r.error.message) || r.error || '');\n    const lead = msg.match(/^\\s*(\\d{3})\\b/);\n    const code = Number((r.error && r.error.httpCode) || (lead && lead[1]) || 0);\n    return { ok: false, status: code, body: null, err: short(msg) };\n  }\n  if (r && typeof r.statusCode === 'number') {\n    const ok = r.statusCode >= 200 && r.statusCode < 300;\n    const d = r.body && typeof r.body === 'object' ? r.body.detail : null;\n    return { ok, status: r.statusCode, body: r.body, err: ok ? null : 'HTTP ' + r.statusCode + (d ? ': ' + short(typeof d === 'string' ? d : JSON.stringify(d)) : '') };\n  }\n  return { ok: false, status: 0, body: null, err: 'unrecognized response shape' };\n};\nconst mkResult = (ctx, o) => ({\n  run_id: String(ctx.run_id), batch_id: ctx.batch_id || null,\n  log_kind: o.kind || 'action', log_action: o.action, log_outcome: o.outcome,\n  log_detail: short(o.detail || '', 300), notifications: o.notifications || [],\n});\nconst note = (type, key, batchId, jobId, subject, lines) => ({\n  event_type: type, event_key: key, batch_id: batchId || null, job_id: jobId || null,\n  subject: '[Product Intelligence] ' + subject,\n  text: lines.filter((x) => x !== null && x !== undefined && x !== '').join('\\n'),\n});\nconst refLines = (cfg, batchId) => [\n  '',\n  'Investigate:',\n  batchId ? '  Job status: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/status' : null,\n  batchId ? '  Unmatched images: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/image-matches' : null,\n  cfg.n8n_base_url ? '  n8n execution: ' + cfg.n8n_base_url + '/workflow/' + $workflow.id + '/executions/' + $execution.id\n                   : '  n8n execution id: ' + $execution.id,\n  'Time: ' + stamp(),\n];\nconst countLine = (b) => 'Counts: files=' + b.total_files + ', images=' + b.total_images + ', products=' + b.total_products;\n// ---- end helpers ----\n\n// Evaluate Process Result - Code node (each item). Input: POST /process response (fullResponse, neverError) or error item.\nconst d = $('Decide Process').item.json;\nconst r = unwrap($json);\nconst ctx = { run_id: d.run_id, batch_id: d.batch_id };\nif (r.status === 401 || r.status === 403) throw new Error('Intake API rejected credentials (HTTP ' + r.status + ') on process; stopping the run');\nlet o;\nif (r.ok && r.body && r.body.job_id) o = { outcome: 'accepted', detail: d.log_outcome + '; job ' + r.body.job_id + ' ' + r.body.status, uncertain: false };\nelse if (r.status >= 400 && r.status < 500) o = { outcome: 'rejected_' + r.status, detail: d.log_outcome + '; ' + r.err, uncertain: false };\nelse o = { outcome: 'uncertain', detail: d.log_outcome + '; ' + (r.err || 'no usable response'), uncertain: true }; // timeout, 5xx, malformed 2xx\nreturn { json: { ...mkResult(ctx, { action: 'process', outcome: o.outcome, detail: o.detail }), uncertain: o.uncertain } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "f071b4fe-e864-56db-9966-caa5b1f3c4c7",
+      "name": "Evaluate Process Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4750,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "0a84dc21-5444-5d34-bc9f-39a490b7a2c0",
+              "leftValue": "={{ $json.uncertain }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "244a99e0-e542-5090-8430-7dc7ce912794",
+      "name": "Process Uncertain?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        5000,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Validate Config').first().json.intake_base_url }}/api/v1/batches/{{ encodeURIComponent($json.batch_id) }}/status",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "json",
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "c6e45f04-c872-5b0a-b285-b782dda3dbc8",
+      "name": "Verify Job Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5250,
+        0
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- shared helpers (prepended to every Code node by the generator) ----\nconst short = (v, n = 200) => String(v == null ? '' : v).replace(/\\s+/g, ' ').slice(0, n);\nconst hash = (s) => { let h = 5381; for (const c of String(s)) h = ((h * 33) ^ c.charCodeAt(0)) >>> 0; return h.toString(36); };\n// Service timestamps are naive ISO strings; they are treated as UTC. Date-only values are midnight UTC.\nconst parseTs = (s) => {\n  if (!s) return null;\n  let t = String(s).trim();\n  if (/^\\d{4}-\\d{2}-\\d{2}$/.test(t)) t += 'T00:00:00Z';\n  else if (!/(Z|[+-]\\d{2}:?\\d{2})$/i.test(t)) t += 'Z';\n  const ms = Date.parse(t);\n  return Number.isNaN(ms) ? null : ms;\n};\nconst minutesSince = (s) => { const ms = parseTs(s); return ms === null ? null : (Date.now() - ms) / 60000; };\nconst pkt = (ms) => new Date(ms).toLocaleString('en-GB', { timeZone: 'Asia/Karachi', hour12: false }) + ' PKT';\nconst stamp = () => { const n = Date.now(); return new Date(n).toISOString() + ' (UTC) / ' + pkt(n); };\n// Normalizes an HTTP node result: fullResponse item, or the error item from onError: continueRegularOutput.\nconst unwrap = (r) => {\n  if (r && r.error) {\n    const msg = String((r.error && r.error.message) || r.error || '');\n    const lead = msg.match(/^\\s*(\\d{3})\\b/);\n    const code = Number((r.error && r.error.httpCode) || (lead && lead[1]) || 0);\n    return { ok: false, status: code, body: null, err: short(msg) };\n  }\n  if (r && typeof r.statusCode === 'number') {\n    const ok = r.statusCode >= 200 && r.statusCode < 300;\n    const d = r.body && typeof r.body === 'object' ? r.body.detail : null;\n    return { ok, status: r.statusCode, body: r.body, err: ok ? null : 'HTTP ' + r.statusCode + (d ? ': ' + short(typeof d === 'string' ? d : JSON.stringify(d)) : '') };\n  }\n  return { ok: false, status: 0, body: null, err: 'unrecognized response shape' };\n};\nconst mkResult = (ctx, o) => ({\n  run_id: String(ctx.run_id), batch_id: ctx.batch_id || null,\n  log_kind: o.kind || 'action', log_action: o.action, log_outcome: o.outcome,\n  log_detail: short(o.detail || '', 300), notifications: o.notifications || [],\n});\nconst note = (type, key, batchId, jobId, subject, lines) => ({\n  event_type: type, event_key: key, batch_id: batchId || null, job_id: jobId || null,\n  subject: '[Product Intelligence] ' + subject,\n  text: lines.filter((x) => x !== null && x !== undefined && x !== '').join('\\n'),\n});\nconst refLines = (cfg, batchId) => [\n  '',\n  'Investigate:',\n  batchId ? '  Job status: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/status' : null,\n  batchId ? '  Unmatched images: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/image-matches' : null,\n  cfg.n8n_base_url ? '  n8n execution: ' + cfg.n8n_base_url + '/workflow/' + $workflow.id + '/executions/' + $execution.id\n                   : '  n8n execution id: ' + $execution.id,\n  'Time: ' + stamp(),\n];\nconst countLine = (b) => 'Counts: files=' + b.total_files + ', images=' + b.total_images + ', products=' + b.total_products;\n// ---- end helpers ----\n\n// Shape Verified Result - Code node (each item). After an uncertain process call, the job status is the authority.\nconst e = $('Evaluate Process Result').item.json;\nconst r = unwrap($json);\nconst ctx = { run_id: e.run_id, batch_id: e.batch_id };\nlet outcome, detail;\nif (r.ok && r.body && (r.body.status === 'pending' || r.body.status === 'running')) { outcome = 'accepted_after_verify'; detail = 'Job ' + r.body.job_id + ' is ' + r.body.status; }\nelse if (r.ok && r.body) { outcome = 'not_started_after_uncertain'; detail = 'Job status ' + r.body.status + '; no immediate retry, next scheduled run re-checks'; }\nelse { outcome = 'unverified_after_uncertain'; detail = (r.err || 'verification failed') + '; no immediate retry'; }\nreturn { json: mkResult(ctx, { action: 'process_verify', outcome, detail }) };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "61cef4af-0639-5ef7-8f3f-ed240f754251",
+      "name": "Shape Verified Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5500,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Validate Config').first().json.intake_base_url }}/api/v1/batches/{{ encodeURIComponent($('Route by Status').item.json.batch_id) }}/status",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "json",
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "7f5b1748-2c72-5120-8a83-ddeaf83468c7",
+      "name": "Check Processing Job Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3750,
+        170
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- shared helpers (prepended to every Code node by the generator) ----\nconst short = (v, n = 200) => String(v == null ? '' : v).replace(/\\s+/g, ' ').slice(0, n);\nconst hash = (s) => { let h = 5381; for (const c of String(s)) h = ((h * 33) ^ c.charCodeAt(0)) >>> 0; return h.toString(36); };\n// Service timestamps are naive ISO strings; they are treated as UTC. Date-only values are midnight UTC.\nconst parseTs = (s) => {\n  if (!s) return null;\n  let t = String(s).trim();\n  if (/^\\d{4}-\\d{2}-\\d{2}$/.test(t)) t += 'T00:00:00Z';\n  else if (!/(Z|[+-]\\d{2}:?\\d{2})$/i.test(t)) t += 'Z';\n  const ms = Date.parse(t);\n  return Number.isNaN(ms) ? null : ms;\n};\nconst minutesSince = (s) => { const ms = parseTs(s); return ms === null ? null : (Date.now() - ms) / 60000; };\nconst pkt = (ms) => new Date(ms).toLocaleString('en-GB', { timeZone: 'Asia/Karachi', hour12: false }) + ' PKT';\nconst stamp = () => { const n = Date.now(); return new Date(n).toISOString() + ' (UTC) / ' + pkt(n); };\n// Normalizes an HTTP node result: fullResponse item, or the error item from onError: continueRegularOutput.\nconst unwrap = (r) => {\n  if (r && r.error) {\n    const msg = String((r.error && r.error.message) || r.error || '');\n    const lead = msg.match(/^\\s*(\\d{3})\\b/);\n    const code = Number((r.error && r.error.httpCode) || (lead && lead[1]) || 0);\n    return { ok: false, status: code, body: null, err: short(msg) };\n  }\n  if (r && typeof r.statusCode === 'number') {\n    const ok = r.statusCode >= 200 && r.statusCode < 300;\n    const d = r.body && typeof r.body === 'object' ? r.body.detail : null;\n    return { ok, status: r.statusCode, body: r.body, err: ok ? null : 'HTTP ' + r.statusCode + (d ? ': ' + short(typeof d === 'string' ? d : JSON.stringify(d)) : '') };\n  }\n  return { ok: false, status: 0, body: null, err: 'unrecognized response shape' };\n};\nconst mkResult = (ctx, o) => ({\n  run_id: String(ctx.run_id), batch_id: ctx.batch_id || null,\n  log_kind: o.kind || 'action', log_action: o.action, log_outcome: o.outcome,\n  log_detail: short(o.detail || '', 300), notifications: o.notifications || [],\n});\nconst note = (type, key, batchId, jobId, subject, lines) => ({\n  event_type: type, event_key: key, batch_id: batchId || null, job_id: jobId || null,\n  subject: '[Product Intelligence] ' + subject,\n  text: lines.filter((x) => x !== null && x !== undefined && x !== '').join('\\n'),\n});\nconst refLines = (cfg, batchId) => [\n  '',\n  'Investigate:',\n  batchId ? '  Job status: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/status' : null,\n  batchId ? '  Unmatched images: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/image-matches' : null,\n  cfg.n8n_base_url ? '  n8n execution: ' + cfg.n8n_base_url + '/workflow/' + $workflow.id + '/executions/' + $execution.id\n                   : '  n8n execution id: ' + $execution.id,\n  'Time: ' + stamp(),\n];\nconst countLine = (b) => 'Counts: files=' + b.total_files + ', images=' + b.total_images + ', products=' + b.total_products;\n// ---- end helpers ----\n\n// Assess Processing - Code node (each item). Alert-only policy: never calls /process for 'processing' batches.\nconst b = $('Route by Status').item.json;\nconst cfg = $('Validate Config').first().json;\nconst r = unwrap($json);\nconst ctx = { run_id: b.run_id, batch_id: b.batch_id };\nif (r.ok && r.body) {\n  const js = r.body.status;\n  const age = minutesSince(r.body.started_at);\n  if ((js === 'running' || js === 'pending') && age !== null && age > cfg.stale_processing_minutes) {\n    const n = note('stale_processing', b.event_key, b.batch_id, r.body.job_id, 'Batch stuck in processing', [\n      'Batch ' + b.batch_id + ' has been \"processing\" with a ' + js + ' job for about ' + Math.round(age) + ' minutes (limit ' + cfg.stale_processing_minutes + ').',\n      'No automatic action was taken. The service recovers stale running jobs only when /process is called manually.',\n      'Job ID: ' + r.body.job_id, countLine(b), ...refLines(cfg, b.batch_id)]);\n    return { json: mkResult(ctx, { action: 'processing_check', outcome: 'stale_alert', detail: 'job ' + js + ', ' + Math.round(age) + ' min', notifications: [n] }) };\n  }\n  return { json: mkResult(ctx, { action: 'processing_check', outcome: 'processing_ok', detail: 'job ' + js + (age === null ? '' : ', ' + Math.round(age) + ' min') }) };\n}\nreturn { json: mkResult(ctx, { action: 'processing_check', outcome: 'status_unavailable', detail: r.err }) };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "e88ff43e-cad9-5389-b6e0-e2a847e2d5ed",
+      "name": "Assess Processing",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4000,
+        170
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Validate Config').first().json.intake_base_url }}/api/v1/batches/{{ encodeURIComponent($('Route by Status').item.json.batch_id) }}/status",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "960dea73-9311-51e0-a63b-3723704405d7",
+      "name": "Get Job Status (completed)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3750,
+        340
+      ],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Validate Config').first().json.intake_base_url }}/api/v1/batches/{{ encodeURIComponent($('Route by Status').item.json.batch_id) }}/image-matches",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "3e9d12ea-bb63-523f-8720-119949b9b055",
+      "name": "Get Unmatched Images (completed)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4000,
+        340
+      ],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- shared helpers (prepended to every Code node by the generator) ----\nconst short = (v, n = 200) => String(v == null ? '' : v).replace(/\\s+/g, ' ').slice(0, n);\nconst hash = (s) => { let h = 5381; for (const c of String(s)) h = ((h * 33) ^ c.charCodeAt(0)) >>> 0; return h.toString(36); };\n// Service timestamps are naive ISO strings; they are treated as UTC. Date-only values are midnight UTC.\nconst parseTs = (s) => {\n  if (!s) return null;\n  let t = String(s).trim();\n  if (/^\\d{4}-\\d{2}-\\d{2}$/.test(t)) t += 'T00:00:00Z';\n  else if (!/(Z|[+-]\\d{2}:?\\d{2})$/i.test(t)) t += 'Z';\n  const ms = Date.parse(t);\n  return Number.isNaN(ms) ? null : ms;\n};\nconst minutesSince = (s) => { const ms = parseTs(s); return ms === null ? null : (Date.now() - ms) / 60000; };\nconst pkt = (ms) => new Date(ms).toLocaleString('en-GB', { timeZone: 'Asia/Karachi', hour12: false }) + ' PKT';\nconst stamp = () => { const n = Date.now(); return new Date(n).toISOString() + ' (UTC) / ' + pkt(n); };\n// Normalizes an HTTP node result: fullResponse item, or the error item from onError: continueRegularOutput.\nconst unwrap = (r) => {\n  if (r && r.error) {\n    const msg = String((r.error && r.error.message) || r.error || '');\n    const lead = msg.match(/^\\s*(\\d{3})\\b/);\n    const code = Number((r.error && r.error.httpCode) || (lead && lead[1]) || 0);\n    return { ok: false, status: code, body: null, err: short(msg) };\n  }\n  if (r && typeof r.statusCode === 'number') {\n    const ok = r.statusCode >= 200 && r.statusCode < 300;\n    const d = r.body && typeof r.body === 'object' ? r.body.detail : null;\n    return { ok, status: r.statusCode, body: r.body, err: ok ? null : 'HTTP ' + r.statusCode + (d ? ': ' + short(typeof d === 'string' ? d : JSON.stringify(d)) : '') };\n  }\n  return { ok: false, status: 0, body: null, err: 'unrecognized response shape' };\n};\nconst mkResult = (ctx, o) => ({\n  run_id: String(ctx.run_id), batch_id: ctx.batch_id || null,\n  log_kind: o.kind || 'action', log_action: o.action, log_outcome: o.outcome,\n  log_detail: short(o.detail || '', 300), notifications: o.notifications || [],\n});\nconst note = (type, key, batchId, jobId, subject, lines) => ({\n  event_type: type, event_key: key, batch_id: batchId || null, job_id: jobId || null,\n  subject: '[Product Intelligence] ' + subject,\n  text: lines.filter((x) => x !== null && x !== undefined && x !== '').join('\\n'),\n});\nconst refLines = (cfg, batchId) => [\n  '',\n  'Investigate:',\n  batchId ? '  Job status: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/status' : null,\n  batchId ? '  Unmatched images: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/image-matches' : null,\n  cfg.n8n_base_url ? '  n8n execution: ' + cfg.n8n_base_url + '/workflow/' + $workflow.id + '/executions/' + $execution.id\n                   : '  n8n execution id: ' + $execution.id,\n  'Time: ' + stamp(),\n];\nconst countLine = (b) => 'Counts: files=' + b.total_files + ', images=' + b.total_images + ', products=' + b.total_products;\n// ---- end helpers ----\n\n// Build Completed Notifications - Code node (each item).\n// Previous nodes: \"Get Job Status (completed)\" then \"Get Unmatched Images (completed)\" (this node's input).\nconst b = $('Route by Status').item.json;\nconst cfg = $('Validate Config').first().json;\nconst job = unwrap($('Get Job Status (completed)').item.json);\nconst img = unwrap($json);\nconst ctx = { run_id: b.run_id, batch_id: b.batch_id };\nconst jb = job.ok && job.body ? job.body : null;\nconst rs = jb && jb.result_summary && typeof jb.result_summary === 'object' ? jb.result_summary : null;\nconst unmatched = img.ok && img.body && Array.isArray(img.body.unmatched_images) ? img.body.unmatched_images : null;\nconst count = unmatched ? (Number.isInteger(img.body.count) ? img.body.count : unmatched.length) : null;\nconst jobId = jb ? jb.job_id : null;\nconst notifications = [note('batch_completed', b.event_key, b.batch_id, jobId, 'Batch completed: ' + b.batch_id, [\n  'Event: batch_completed',\n  'Batch ID: ' + b.batch_id,\n  'Job ID: ' + (jobId || 'unavailable (' + (job.err || 'no job') + ')'),\n  'Status: completed',\n  'Retry count: ' + (rs && rs.retry_count !== undefined ? rs.retry_count : 'not reported'),\n  countLine(b),\n  'Unmatched images needing review: ' + (count === null ? 'unknown (image check failed: ' + short(img.err) + ')' : count),\n  rs ? 'Result summary: ' + short(JSON.stringify(rs), 400) : null,\n  ...refLines(cfg, b.batch_id)])];\nif (count > 0) {\n  const sample = unmatched.slice(0, 5).map((u) => '  - ' + short(typeof u === 'string' ? u : JSON.stringify(u), 140));\n  notifications.push(note('review_required', 'review_required:' + b.batch_id + ':' + (b.completed_at || b.started_at || 'na'), b.batch_id, jobId,\n    'Review required: ' + count + ' unmatched image(s) in ' + b.batch_id, [\n      'Event: review_required', 'Batch ID: ' + b.batch_id, 'Job ID: ' + (jobId || 'unavailable'),\n      'Unmatched images: ' + count, countLine(b), 'Examples:', ...sample, count > 5 ? '  ... and ' + (count - 5) + ' more' : null,\n      ...refLines(cfg, b.batch_id)]));\n}\nreturn { json: mkResult(ctx, { action: 'completed', outcome: 'notification_prepared', detail: 'notifications=' + notifications.length + ' unmatched=' + count, notifications }) };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "c4b2a6e3-882e-5d65-8e1d-d2959ae86ca0",
+      "name": "Build Completed Notifications",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4250,
+        170
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Validate Config').first().json.intake_base_url }}/api/v1/batches/{{ encodeURIComponent($('Route by Status').item.json.batch_id) }}/status",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "38d28547-45ff-5606-b7ae-2915f9fe543a",
+      "name": "Get Job Status (failed)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3750,
+        510
+      ],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- shared helpers (prepended to every Code node by the generator) ----\nconst short = (v, n = 200) => String(v == null ? '' : v).replace(/\\s+/g, ' ').slice(0, n);\nconst hash = (s) => { let h = 5381; for (const c of String(s)) h = ((h * 33) ^ c.charCodeAt(0)) >>> 0; return h.toString(36); };\n// Service timestamps are naive ISO strings; they are treated as UTC. Date-only values are midnight UTC.\nconst parseTs = (s) => {\n  if (!s) return null;\n  let t = String(s).trim();\n  if (/^\\d{4}-\\d{2}-\\d{2}$/.test(t)) t += 'T00:00:00Z';\n  else if (!/(Z|[+-]\\d{2}:?\\d{2})$/i.test(t)) t += 'Z';\n  const ms = Date.parse(t);\n  return Number.isNaN(ms) ? null : ms;\n};\nconst minutesSince = (s) => { const ms = parseTs(s); return ms === null ? null : (Date.now() - ms) / 60000; };\nconst pkt = (ms) => new Date(ms).toLocaleString('en-GB', { timeZone: 'Asia/Karachi', hour12: false }) + ' PKT';\nconst stamp = () => { const n = Date.now(); return new Date(n).toISOString() + ' (UTC) / ' + pkt(n); };\n// Normalizes an HTTP node result: fullResponse item, or the error item from onError: continueRegularOutput.\nconst unwrap = (r) => {\n  if (r && r.error) {\n    const msg = String((r.error && r.error.message) || r.error || '');\n    const lead = msg.match(/^\\s*(\\d{3})\\b/);\n    const code = Number((r.error && r.error.httpCode) || (lead && lead[1]) || 0);\n    return { ok: false, status: code, body: null, err: short(msg) };\n  }\n  if (r && typeof r.statusCode === 'number') {\n    const ok = r.statusCode >= 200 && r.statusCode < 300;\n    const d = r.body && typeof r.body === 'object' ? r.body.detail : null;\n    return { ok, status: r.statusCode, body: r.body, err: ok ? null : 'HTTP ' + r.statusCode + (d ? ': ' + short(typeof d === 'string' ? d : JSON.stringify(d)) : '') };\n  }\n  return { ok: false, status: 0, body: null, err: 'unrecognized response shape' };\n};\nconst mkResult = (ctx, o) => ({\n  run_id: String(ctx.run_id), batch_id: ctx.batch_id || null,\n  log_kind: o.kind || 'action', log_action: o.action, log_outcome: o.outcome,\n  log_detail: short(o.detail || '', 300), notifications: o.notifications || [],\n});\nconst note = (type, key, batchId, jobId, subject, lines) => ({\n  event_type: type, event_key: key, batch_id: batchId || null, job_id: jobId || null,\n  subject: '[Product Intelligence] ' + subject,\n  text: lines.filter((x) => x !== null && x !== undefined && x !== '').join('\\n'),\n});\nconst refLines = (cfg, batchId) => [\n  '',\n  'Investigate:',\n  batchId ? '  Job status: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/status' : null,\n  batchId ? '  Unmatched images: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/image-matches' : null,\n  cfg.n8n_base_url ? '  n8n execution: ' + cfg.n8n_base_url + '/workflow/' + $workflow.id + '/executions/' + $execution.id\n                   : '  n8n execution id: ' + $execution.id,\n  'Time: ' + stamp(),\n];\nconst countLine = (b) => 'Counts: files=' + b.total_files + ', images=' + b.total_images + ', products=' + b.total_products;\n// ---- end helpers ----\n\n// Build Dead-Letter Notification - Code node (each item). Input: GET /status for a 'failed' batch.\nconst b = $('Route by Status').item.json;\nconst cfg = $('Validate Config').first().json;\nconst job = unwrap($json);\nconst ctx = { run_id: b.run_id, batch_id: b.batch_id };\nconst jb = job.ok && job.body ? job.body : null;\nconst rs = jb && jb.result_summary && typeof jb.result_summary === 'object' ? jb.result_summary : null;\nconst dl = rs && rs.dead_letter !== undefined ? (rs.dead_letter ? 'yes' : 'no') : 'unknown';\nconst n = note('batch_dead_lettered', b.event_key, b.batch_id, jb && jb.job_id, 'Batch FAILED: ' + b.batch_id, [\n  'Event: batch_dead_lettered (terminal; no automatic retry)',\n  'Batch ID: ' + b.batch_id,\n  'Job ID: ' + (jb ? jb.job_id : 'unavailable (' + (job.err || 'no job') + ')'),\n  'Status: failed',\n  'Dead-lettered by service: ' + dl,\n  'Retry count: ' + (rs && rs.retry_count !== undefined ? rs.retry_count : 'not reported'),\n  'Error: ' + short((jb && jb.error_message) || b.error_message || 'none reported', 300),\n  countLine(b), ...refLines(cfg, b.batch_id)]);\nreturn { json: mkResult(ctx, { action: 'failed', outcome: 'notification_prepared', detail: 'dead_letter=' + dl, notifications: [n] }) };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "21a525e2-1fac-5ad4-a027-79067e125bf0",
+      "name": "Build Dead-Letter Notification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4000,
+        510
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Validate Config').first().json.intake_base_url }}/api/v1/batches/{{ encodeURIComponent($('Route by Status').item.json.batch_id) }}/image-matches",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "88970b1a-efff-542d-93c3-0f6950457f17",
+      "name": "Get Unmatched Images (review)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3750,
+        680
+      ],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- shared helpers (prepended to every Code node by the generator) ----\nconst short = (v, n = 200) => String(v == null ? '' : v).replace(/\\s+/g, ' ').slice(0, n);\nconst hash = (s) => { let h = 5381; for (const c of String(s)) h = ((h * 33) ^ c.charCodeAt(0)) >>> 0; return h.toString(36); };\n// Service timestamps are naive ISO strings; they are treated as UTC. Date-only values are midnight UTC.\nconst parseTs = (s) => {\n  if (!s) return null;\n  let t = String(s).trim();\n  if (/^\\d{4}-\\d{2}-\\d{2}$/.test(t)) t += 'T00:00:00Z';\n  else if (!/(Z|[+-]\\d{2}:?\\d{2})$/i.test(t)) t += 'Z';\n  const ms = Date.parse(t);\n  return Number.isNaN(ms) ? null : ms;\n};\nconst minutesSince = (s) => { const ms = parseTs(s); return ms === null ? null : (Date.now() - ms) / 60000; };\nconst pkt = (ms) => new Date(ms).toLocaleString('en-GB', { timeZone: 'Asia/Karachi', hour12: false }) + ' PKT';\nconst stamp = () => { const n = Date.now(); return new Date(n).toISOString() + ' (UTC) / ' + pkt(n); };\n// Normalizes an HTTP node result: fullResponse item, or the error item from onError: continueRegularOutput.\nconst unwrap = (r) => {\n  if (r && r.error) {\n    const msg = String((r.error && r.error.message) || r.error || '');\n    const lead = msg.match(/^\\s*(\\d{3})\\b/);\n    const code = Number((r.error && r.error.httpCode) || (lead && lead[1]) || 0);\n    return { ok: false, status: code, body: null, err: short(msg) };\n  }\n  if (r && typeof r.statusCode === 'number') {\n    const ok = r.statusCode >= 200 && r.statusCode < 300;\n    const d = r.body && typeof r.body === 'object' ? r.body.detail : null;\n    return { ok, status: r.statusCode, body: r.body, err: ok ? null : 'HTTP ' + r.statusCode + (d ? ': ' + short(typeof d === 'string' ? d : JSON.stringify(d)) : '') };\n  }\n  return { ok: false, status: 0, body: null, err: 'unrecognized response shape' };\n};\nconst mkResult = (ctx, o) => ({\n  run_id: String(ctx.run_id), batch_id: ctx.batch_id || null,\n  log_kind: o.kind || 'action', log_action: o.action, log_outcome: o.outcome,\n  log_detail: short(o.detail || '', 300), notifications: o.notifications || [],\n});\nconst note = (type, key, batchId, jobId, subject, lines) => ({\n  event_type: type, event_key: key, batch_id: batchId || null, job_id: jobId || null,\n  subject: '[Product Intelligence] ' + subject,\n  text: lines.filter((x) => x !== null && x !== undefined && x !== '').join('\\n'),\n});\nconst refLines = (cfg, batchId) => [\n  '',\n  'Investigate:',\n  batchId ? '  Job status: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/status' : null,\n  batchId ? '  Unmatched images: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/image-matches' : null,\n  cfg.n8n_base_url ? '  n8n execution: ' + cfg.n8n_base_url + '/workflow/' + $workflow.id + '/executions/' + $execution.id\n                   : '  n8n execution id: ' + $execution.id,\n  'Time: ' + stamp(),\n];\nconst countLine = (b) => 'Counts: files=' + b.total_files + ', images=' + b.total_images + ', products=' + b.total_products;\n// ---- end helpers ----\n\n// Build Review Notification - Code node (each item). Input: GET /image-matches for an 'awaiting_review' batch.\nconst b = $('Route by Status').item.json;\nconst cfg = $('Validate Config').first().json;\nconst img = unwrap($json);\nconst ctx = { run_id: b.run_id, batch_id: b.batch_id };\nconst list = img.ok && img.body && Array.isArray(img.body.unmatched_images) ? img.body.unmatched_images : null;\nconst count = list ? (Number.isInteger(img.body.count) ? img.body.count : list.length) : null;\nconst sample = (list || []).slice(0, 5).map((u) => '  - ' + short(typeof u === 'string' ? u : JSON.stringify(u), 140));\nconst n = note('review_required', b.event_key, b.batch_id, null, 'Review required: batch ' + b.batch_id, [\n  'Event: review_required', 'Batch ID: ' + b.batch_id, 'Status: awaiting_review',\n  'Unmatched images: ' + (count === null ? 'unknown (image check failed: ' + short(img.err) + ')' : count),\n  countLine(b), sample.length ? 'Examples:' : null, ...sample, ...refLines(cfg, b.batch_id)]);\nreturn { json: mkResult(ctx, { action: 'awaiting_review', outcome: 'notification_prepared', detail: 'unmatched=' + count, notifications: [n] }) };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "ff71509b-6f6c-5fbb-9220-24ed12b771d1",
+      "name": "Build Review Notification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4000,
+        680
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- shared helpers (prepended to every Code node by the generator) ----\nconst short = (v, n = 200) => String(v == null ? '' : v).replace(/\\s+/g, ' ').slice(0, n);\nconst hash = (s) => { let h = 5381; for (const c of String(s)) h = ((h * 33) ^ c.charCodeAt(0)) >>> 0; return h.toString(36); };\n// Service timestamps are naive ISO strings; they are treated as UTC. Date-only values are midnight UTC.\nconst parseTs = (s) => {\n  if (!s) return null;\n  let t = String(s).trim();\n  if (/^\\d{4}-\\d{2}-\\d{2}$/.test(t)) t += 'T00:00:00Z';\n  else if (!/(Z|[+-]\\d{2}:?\\d{2})$/i.test(t)) t += 'Z';\n  const ms = Date.parse(t);\n  return Number.isNaN(ms) ? null : ms;\n};\nconst minutesSince = (s) => { const ms = parseTs(s); return ms === null ? null : (Date.now() - ms) / 60000; };\nconst pkt = (ms) => new Date(ms).toLocaleString('en-GB', { timeZone: 'Asia/Karachi', hour12: false }) + ' PKT';\nconst stamp = () => { const n = Date.now(); return new Date(n).toISOString() + ' (UTC) / ' + pkt(n); };\n// Normalizes an HTTP node result: fullResponse item, or the error item from onError: continueRegularOutput.\nconst unwrap = (r) => {\n  if (r && r.error) {\n    const msg = String((r.error && r.error.message) || r.error || '');\n    const lead = msg.match(/^\\s*(\\d{3})\\b/);\n    const code = Number((r.error && r.error.httpCode) || (lead && lead[1]) || 0);\n    return { ok: false, status: code, body: null, err: short(msg) };\n  }\n  if (r && typeof r.statusCode === 'number') {\n    const ok = r.statusCode >= 200 && r.statusCode < 300;\n    const d = r.body && typeof r.body === 'object' ? r.body.detail : null;\n    return { ok, status: r.statusCode, body: r.body, err: ok ? null : 'HTTP ' + r.statusCode + (d ? ': ' + short(typeof d === 'string' ? d : JSON.stringify(d)) : '') };\n  }\n  return { ok: false, status: 0, body: null, err: 'unrecognized response shape' };\n};\nconst mkResult = (ctx, o) => ({\n  run_id: String(ctx.run_id), batch_id: ctx.batch_id || null,\n  log_kind: o.kind || 'action', log_action: o.action, log_outcome: o.outcome,\n  log_detail: short(o.detail || '', 300), notifications: o.notifications || [],\n});\nconst note = (type, key, batchId, jobId, subject, lines) => ({\n  event_type: type, event_key: key, batch_id: batchId || null, job_id: jobId || null,\n  subject: '[Product Intelligence] ' + subject,\n  text: lines.filter((x) => x !== null && x !== undefined && x !== '').join('\\n'),\n});\nconst refLines = (cfg, batchId) => [\n  '',\n  'Investigate:',\n  batchId ? '  Job status: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/status' : null,\n  batchId ? '  Unmatched images: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/image-matches' : null,\n  cfg.n8n_base_url ? '  n8n execution: ' + cfg.n8n_base_url + '/workflow/' + $workflow.id + '/executions/' + $execution.id\n                   : '  n8n execution id: ' + $execution.id,\n  'Time: ' + stamp(),\n];\nconst countLine = (b) => 'Counts: files=' + b.total_files + ', images=' + b.total_images + ', products=' + b.total_products;\n// ---- end helpers ----\n\n// Build Unknown Status Alert - Code node (each item). Unknown or invalid records are never processed, only reported once.\nconst b = $json;\nconst cfg = $('Validate Config').first().json;\nconst ctx = { run_id: b.run_id, batch_id: b.batch_id };\nconst n = note('unknown_status', b.event_key, b.batch_id, null, 'Unrecognized batch record', [\n  'A batch record could not be routed and was NOT processed.',\n  'Batch ID: ' + (b.batch_id || 'missing'),\n  'Status value: ' + (b.status || 'missing'),\n  b.invalid_reason ? 'Problem: ' + b.invalid_reason : 'Problem: status is not one of discovered, processing, completed, failed, awaiting_review',\n  ...refLines(cfg, b.batch_id)]);\nreturn { json: mkResult(ctx, { action: 'route', outcome: b.route_status === '__invalid__' ? 'invalid_record' : 'unknown_status', detail: (b.status || 'no status') + ' / ' + (b.invalid_reason || 'unlisted status'), notifications: [n] }) };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "37f8e454-5b1d-581b-998b-ebf9426fdbb0",
+      "name": "Build Unknown Status Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3750,
+        850
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "insert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "pi_run_log"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "run_id": "={{ $json.run_id }}",
+            "kind": "={{ $json.log_kind }}",
+            "batch_id": "={{ $json.batch_id || '' }}",
+            "action": "={{ $json.log_action }}",
+            "outcome": "={{ $json.log_outcome }}",
+            "detail": "={{ $json.log_detail }}"
+          },
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "39108ffb-e3dc-50e2-a319-cba81743e01d",
+      "name": "Record Action Outcome",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        5750,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ---- shared helpers (prepended to every Code node by the generator) ----\nconst short = (v, n = 200) => String(v == null ? '' : v).replace(/\\s+/g, ' ').slice(0, n);\nconst hash = (s) => { let h = 5381; for (const c of String(s)) h = ((h * 33) ^ c.charCodeAt(0)) >>> 0; return h.toString(36); };\n// Service timestamps are naive ISO strings; they are treated as UTC. Date-only values are midnight UTC.\nconst parseTs = (s) => {\n  if (!s) return null;\n  let t = String(s).trim();\n  if (/^\\d{4}-\\d{2}-\\d{2}$/.test(t)) t += 'T00:00:00Z';\n  else if (!/(Z|[+-]\\d{2}:?\\d{2})$/i.test(t)) t += 'Z';\n  const ms = Date.parse(t);\n  return Number.isNaN(ms) ? null : ms;\n};\nconst minutesSince = (s) => { const ms = parseTs(s); return ms === null ? null : (Date.now() - ms) / 60000; };\nconst pkt = (ms) => new Date(ms).toLocaleString('en-GB', { timeZone: 'Asia/Karachi', hour12: false }) + ' PKT';\nconst stamp = () => { const n = Date.now(); return new Date(n).toISOString() + ' (UTC) / ' + pkt(n); };\n// Normalizes an HTTP node result: fullResponse item, or the error item from onError: continueRegularOutput.\nconst unwrap = (r) => {\n  if (r && r.error) {\n    const msg = String((r.error && r.error.message) || r.error || '');\n    const lead = msg.match(/^\\s*(\\d{3})\\b/);\n    const code = Number((r.error && r.error.httpCode) || (lead && lead[1]) || 0);\n    return { ok: false, status: code, body: null, err: short(msg) };\n  }\n  if (r && typeof r.statusCode === 'number') {\n    const ok = r.statusCode >= 200 && r.statusCode < 300;\n    const d = r.body && typeof r.body === 'object' ? r.body.detail : null;\n    return { ok, status: r.statusCode, body: r.body, err: ok ? null : 'HTTP ' + r.statusCode + (d ? ': ' + short(typeof d === 'string' ? d : JSON.stringify(d)) : '') };\n  }\n  return { ok: false, status: 0, body: null, err: 'unrecognized response shape' };\n};\nconst mkResult = (ctx, o) => ({\n  run_id: String(ctx.run_id), batch_id: ctx.batch_id || null,\n  log_kind: o.kind || 'action', log_action: o.action, log_outcome: o.outcome,\n  log_detail: short(o.detail || '', 300), notifications: o.notifications || [],\n});\nconst note = (type, key, batchId, jobId, subject, lines) => ({\n  event_type: type, event_key: key, batch_id: batchId || null, job_id: jobId || null,\n  subject: '[Product Intelligence] ' + subject,\n  text: lines.filter((x) => x !== null && x !== undefined && x !== '').join('\\n'),\n});\nconst refLines = (cfg, batchId) => [\n  '',\n  'Investigate:',\n  batchId ? '  Job status: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/status' : null,\n  batchId ? '  Unmatched images: ' + cfg.intake_base_url + '/api/v1/batches/' + batchId + '/image-matches' : null,\n  cfg.n8n_base_url ? '  n8n execution: ' + cfg.n8n_base_url + '/workflow/' + $workflow.id + '/executions/' + $execution.id\n                   : '  n8n execution id: ' + $execution.id,\n  'Time: ' + stamp(),\n];\nconst countLine = (b) => 'Counts: files=' + b.total_files + ', images=' + b.total_images + ', products=' + b.total_products;\n// ---- end helpers ----\n\n// Expand Notifications - Code node (all items). Turns each branch result into 0..n individual email items.\nconst cfg = $('Validate Config').first().json;\nconst out = [];\nfor (const it of $input.all()) {\n  for (const n of (it.json.notifications || [])) {\n    out.push({ json: { ...n, run_id: it.json.run_id, notify_to: cfg.notify_to, notify_from: cfg.notify_from } });\n  }\n}\nreturn out;\n"
+      },
+      "id": "0a2427ec-9e92-53db-a38c-2107f2e0c58f",
+      "name": "Expand Notifications",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5750,
+        170
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "rowNotExists",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "pi_notification_events"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "event_key",
+              "condition": "eq",
+              "keyValue": "={{ $json.event_key }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a7ca5c47-ad21-5979-bb8e-02e217faab91",
+      "name": "Dedup Check",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        6000,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $json.notify_from }}",
+        "toEmail": "={{ $json.notify_to }}",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "text",
+        "text": "={{ $json.text }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "8ef07881-fe6e-5aaa-af41-b8da1c82390b",
+      "name": "Send Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        6250,
+        0
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "insert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "pi_notification_events"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "event_key": "={{ $('Dedup Check').item.json.event_key }}",
+            "event_type": "={{ $('Dedup Check').item.json.event_type }}",
+            "batch_id": "={{ $('Dedup Check').item.json.batch_id || '' }}",
+            "job_id": "={{ $('Dedup Check').item.json.job_id || '' }}",
+            "delivery": "sent",
+            "recipient": "={{ $('Dedup Check').item.json.notify_to }}",
+            "sent_at": "={{ new Date().toISOString() }}"
+          },
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "66c6a675-7c61-5db4-b1c6-8feea0a1f2e5",
+      "name": "Record Sent Event",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        6500,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "insert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "pi_run_log"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "run_id": "={{ $('Dedup Check').item.json.run_id }}",
+            "kind": "alert",
+            "batch_id": "={{ $('Dedup Check').item.json.batch_id || '' }}",
+            "action": "email",
+            "outcome": "email_failed",
+            "detail": "={{ String(($json.error && $json.error.message) || 'send failed').slice(0, 300) }}"
+          },
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "4492f6d4-e57a-53ee-bc15-8c3cef5c5f4a",
+      "name": "Log Email Failure",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        6500,
+        170
+      ]
+    },
+    {
+      "parameters": {
+        "width": 560,
+        "height": 420,
+        "content": "## Setup before first run\n**1. Data Tables** (Project > Data tables), all columns type *string*:\n- `pi_run_lock`: lock_name, run_id, expires_at\n- `pi_notification_events`: event_key, event_type, batch_id, job_id, delivery, recipient, sent_at\n- `pi_run_log`: run_id, kind, batch_id, action, outcome, detail\n\n**2. Credentials:** Header Auth (`X-API-Key` = intake key) on Scan, List and all status/process/image nodes; SMTP on **Send Email**.\n\n**3. Config node:** set `notify_since` (ISO date, UTC) so older history is recorded, not emailed.\n\n**4. Settings > Error workflow:** pick *Product Intelligence - Error Alert*.\n\nKeep INACTIVE until tests pass."
+      },
+      "id": "3f4ec1cd-2842-5495-ae52-1c43316804ba",
+      "name": "Setup Notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -480
+      ]
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Validate Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Config": {
+      "main": [
+        [
+          {
+            "node": "Read Run Lock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Run Lock": {
+      "main": [
+        [
+          {
+            "node": "Evaluate Lock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate Lock": {
+      "main": [
+        [
+          {
+            "node": "Lock Held?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lock Held?": {
+      "main": [
+        [
+          {
+            "node": "Record Action Outcome",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Acquire Run Lock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Acquire Run Lock": {
+      "main": [
+        [
+          {
+            "node": "Scan for Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scan for Batches": {
+      "main": [
+        [
+          {
+            "node": "Validate Scan Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Scan Response": {
+      "main": [
+        [
+          {
+            "node": "Scan Auth Failure?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scan Auth Failure?": {
+      "main": [
+        [
+          {
+            "node": "Stop: Intake Auth Failure",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "List Batches",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Build Scan Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Scan Alert": {
+      "main": [
+        [
+          {
+            "node": "Record Action Outcome",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Expand Notifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Batches": {
+      "main": [
+        [
+          {
+            "node": "Normalize & Validate Batches",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Summarize Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summarize Run": {
+      "main": [
+        [
+          {
+            "node": "Record Action Outcome",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Expand Notifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize & Validate Batches": {
+      "main": [
+        [
+          {
+            "node": "Dedup Gate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dedup Gate": {
+      "main": [
+        [
+          {
+            "node": "Historical Event?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Historical Event?": {
+      "main": [
+        [
+          {
+            "node": "Record Suppressed Event",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Route by Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Status": {
+      "main": [
+        [
+          {
+            "node": "Pre-flight Job Status",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Check Processing Job Status",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get Job Status (completed)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get Job Status (failed)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get Unmatched Images (review)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Unknown Status Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pre-flight Job Status": {
+      "main": [
+        [
+          {
+            "node": "Decide Process",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decide Process": {
+      "main": [
+        [
+          {
+            "node": "Eligible to Process?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Eligible to Process?": {
+      "main": [
+        [
+          {
+            "node": "Process Batch",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record Action Outcome",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Expand Notifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Batch": {
+      "main": [
+        [
+          {
+            "node": "Evaluate Process Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate Process Result": {
+      "main": [
+        [
+          {
+            "node": "Process Uncertain?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Uncertain?": {
+      "main": [
+        [
+          {
+            "node": "Verify Job Status",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record Action Outcome",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Expand Notifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Job Status": {
+      "main": [
+        [
+          {
+            "node": "Shape Verified Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shape Verified Result": {
+      "main": [
+        [
+          {
+            "node": "Record Action Outcome",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Expand Notifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Processing Job Status": {
+      "main": [
+        [
+          {
+            "node": "Assess Processing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assess Processing": {
+      "main": [
+        [
+          {
+            "node": "Record Action Outcome",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Expand Notifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Job Status (completed)": {
+      "main": [
+        [
+          {
+            "node": "Get Unmatched Images (completed)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Unmatched Images (completed)": {
+      "main": [
+        [
+          {
+            "node": "Build Completed Notifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Completed Notifications": {
+      "main": [
+        [
+          {
+            "node": "Record Action Outcome",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Expand Notifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Job Status (failed)": {
+      "main": [
+        [
+          {
+            "node": "Build Dead-Letter Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Dead-Letter Notification": {
+      "main": [
+        [
+          {
+            "node": "Record Action Outcome",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Expand Notifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Unmatched Images (review)": {
+      "main": [
+        [
+          {
+            "node": "Build Review Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Review Notification": {
+      "main": [
+        [
+          {
+            "node": "Record Action Outcome",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Expand Notifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Unknown Status Alert": {
+      "main": [
+        [
+          {
+            "node": "Record Action Outcome",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Expand Notifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand Notifications": {
+      "main": [
+        [
+          {
+            "node": "Dedup Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dedup Check": {
+      "main": [
+        [
+          {
+            "node": "Send Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Email": {
+      "main": [
+        [
+          {
+            "node": "Record Sent Event",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Email Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Karachi",
+    "executionTimeout": 1500,
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
