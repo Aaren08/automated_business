@@ -198,10 +198,23 @@ class SupabaseStorage:
         return result.data or []
 
     async def upsert_package_items(self, package_id: str, items: list[dict]) -> list[dict]:
-        """Upsert package items by file_hash (idempotent)."""
+        """Upsert package items by file_hash (idempotent).
+
+        Deduplicates items by file_hash before upserting to avoid PostgreSQL
+        error 21000 ("ON CONFLICT DO UPDATE command cannot affect row a second
+        time") when multiple items in the same batch share the same file hash.
+        """
         for item in items:
             item["batch_id"] = package_id
-        result = self.client.table("batch_items").upsert(items, on_conflict="batch_id,file_hash").execute()
+        seen_hashes: set[str] = set()
+        deduped_items: list[dict] = []
+        for item in items:
+            fh = item.get("file_hash")
+            if fh in seen_hashes:
+                continue
+            seen_hashes.add(fh)
+            deduped_items.append(item)
+        result = self.client.table("batch_items").upsert(deduped_items, on_conflict="batch_id,file_hash").execute()
         return result.data or []
 
     async def get_package_items(self, package_id: str) -> list[dict]:
@@ -351,33 +364,7 @@ class SupabaseStorage:
         )
         return len(result.data or []) > 0
 
-    async def add_price_history(self, history_data: dict) -> dict:
-        """Add price history entry."""
-        result = self.client.table("price_history").insert(history_data).execute()
-        if not result.data:
-            raise Exception("Failed to add price history")
-        return result.data[0]
-
     # ===== Product-to-Source-Item Image Matching =====
-
-    async def get_unmatched_product_images(
-        self, batch_internal_id: str
-    ) -> list[dict]:
-        """Get product images (batch_items) that haven't been matched to a product yet.
-
-        Looks for batch_items with file_type='image' that don't have a
-        product_image_id set (meaning they haven't been processed into
-        product_images yet).
-        """
-        result = (
-            self.client.table("batch_items")
-            .select("*, product_images(*)")
-            .eq("batch_id", batch_internal_id)
-            .eq("file_type", "image")
-            .is_("product_image_id", "null")
-            .execute()
-        )
-        return result.data or []
 
     async def update_batch_item_match(
         self,
@@ -461,7 +448,7 @@ class SupabaseStorage:
         """
         result = (
             self.client.table("batch_items")
-            .select("*, product_images(*)")
+            .select("*, product_images!batch_items_product_image_id_fkey(*)")
             .eq("batch_id", batch_internal_id)
             .eq("file_type", "image")
             .not_.is_("product_image_id", "null")

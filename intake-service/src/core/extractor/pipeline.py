@@ -170,7 +170,7 @@ class ExtractionPipeline:
             results["images_unmatched"] = image_match_results["unmatched"]
 
             # 5. Update package with product count
-            await storage.update_package(package_internal_id, {
+            await storage.update_package(package_id, {
                 "total_products": upsert_results["upserted"],
                 "status": "completed",
                 "completed_at": datetime.utcnow().isoformat(),

@@ -76,7 +76,7 @@ class ImageInventory:
         if not image_items:
             logger.info("no_images_in_batch", batch_id=batch_id)
             return results
-        
+                
         # Get batch source path for correct file resolution
         async with get_supabase() as storage:
             batch = await storage.get_batch_by_id(batch_id)
@@ -135,19 +135,15 @@ class ImageInventory:
                             "contact_sheet_path": cs_result["path"]
                         })
                         # Insert contact sheet metadata
-                        batch_rec = await _run_sync(
-                            storage.client.table("batches").select("id").eq("batch_id", batch_id).limit(1).execute
-                        )
+                        batch_rec = storage.client.table("batches").select("id").eq("batch_id", batch_id).limit(1).execute()
                         if batch_rec.data:
-                            await _run_sync(
-                                storage.client.table("batch_contact_sheets").insert({
-                                    "batch_id": batch_rec.data[0]["id"],
-                                    "storage_path": cs_result["path"],
-                                    "image_count": len(contact_sheet_data),
-                                    "grid_cols": 5,
-                                    "grid_rows": (len(contact_sheet_data) + 4) // 5,
-                                }).execute
-                            )
+                            storage.client.table("batch_contact_sheets").insert({
+                                "batch_id": batch_rec.data[0]["id"],
+                                "storage_path": cs_result["path"],
+                                "image_count": len(contact_sheet_data),
+                                "grid_cols": 5,
+                                "grid_rows": (len(contact_sheet_data) + 4) // 5,
+                            }).execute()
                         else:
                             logger.warning("contact_sheet_batch_not_found", batch_id=batch_id)
                 except Exception as e:
@@ -166,7 +162,6 @@ class ImageInventory:
         """Process a single image file."""
         file_path = self.inbox_path / source_path / item["file_path"]
         file_hash = item["file_hash"]
-        
         # Read image bytes
         with file_path.open("rb") as f:
             image_bytes = f.read()
@@ -190,14 +185,12 @@ class ImageInventory:
             await self._increment_asset_reference(s, existing_asset["id"])
             
             # Update batch_item with asset reference
-            await _run_sync(
-                storage.client.table("batch_items").update({
-                    "product_image_id": existing_asset["id"],
-                    "perceptual_hash": phash,
-                    "width": width,
-                    "height": height,
-                }).eq("id", item["id"]).execute
-            )
+            storage.client.table("batch_items").update({
+                "product_image_id": existing_asset["id"],
+                "perceptual_hash": phash,
+                "width": width,
+                "height": height,
+            }).eq("id", item["id"]).execute()
             
             return {"duplicate": True, "asset_id": existing_asset["id"]}
         
@@ -226,20 +219,18 @@ class ImageInventory:
         }
         
         async with get_supabase() as s:
-            result = await _run_sync(s.client.table("product_images").insert(asset_data).execute)
+            result = s.client.table("product_images").insert(asset_data).execute()
             if result.data:
                 asset_id = result.data[0]["id"]
                 
                 # Update batch_item with asset reference
-                await _run_sync(
-                    storage.client.table("batch_items").update({
-                        "product_image_id": asset_id,
-                        "perceptual_hash": phash,
-                        "width": width,
-                        "height": height,
-                        "thumbnail_path": upload_result["thumbnails"].get("small"),
-                    }).eq("id", item["id"]).execute
-                )
+                storage.client.table("batch_items").update({
+                    "product_image_id": asset_id,
+                    "perceptual_hash": phash,
+                    "width": width,
+                    "height": height,
+                    "thumbnail_path": upload_result["thumbnails"].get("small"),
+                }).eq("id", item["id"]).execute()
                 
                 return {"duplicate": False, "asset_id": asset_id}
         
@@ -247,23 +238,24 @@ class ImageInventory:
     
     async def _find_asset_by_hash(self, storage: "SupabaseStorage", file_hash: str) -> Optional[Dict]:
         """Find existing asset by SHA-256 hash."""
-        result = await _run_sync(
-            storage.client.table("product_images").select("*").eq("file_hash", file_hash).limit(1).execute
-        )
-        return result.data[0] if result.data else None
+        try:
+            result = storage.client.table("product_images").select("*").eq("file_hash", file_hash).limit(1).execute()
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.warning("find_asset_by_hash_error", file_hash=file_hash, error=str(e))
+            return None
     
     async def _increment_asset_reference(self, storage: "SupabaseStorage", asset_id: str):
         """Increment reference count for an asset."""
-        result = await _run_sync(
-            storage.client.table("product_images").select("reference_count").eq("id", asset_id).execute
-        )
-        if result.data:
-            current = result.data[0].get("reference_count", 1)
-            await _run_sync(
+        try:
+            result = storage.client.table("product_images").select("reference_count").eq("id", asset_id).execute()
+            if result.data:
+                current = result.data[0].get("reference_count", 1)
                 storage.client.table("product_images").update({
                     "reference_count": current + 1
-                }).eq("id", asset_id).execute
-            )
+                }).eq("id", asset_id).execute()
+        except Exception as e:
+            logger.warning("increment_asset_reference_error", asset_id=asset_id, error=str(e))
     
     async def find_similar_images(
         self,
@@ -290,7 +282,7 @@ class ImageInventory:
         if exclude_asset_id:
             query = query.neq("id", exclude_asset_id)
         
-        result = await _run_sync(query.execute)
+        result = query.execute()
         
         similar = []
         for asset in result.data:

@@ -45,7 +45,7 @@ async def process_package_files(package_id: str, package_internal_id: str, inbox
     async with get_supabase() as storage:
         job = await storage.get_latest_job_for_batch(package_id)
         if not job:
-            logger.error("no_job_for_package", package_id=package_id)
+            logger.error("no_job_for_package")
             return
 
         job_id = job["id"]
@@ -120,7 +120,7 @@ async def process_package_files(package_id: str, package_internal_id: str, inbox
                     package_id, package_internal_id, stored_items
                 )
                 logger.info("image_inventory_completed",
-                            package_id=package_id, job_id=job_id,
+                            job_id=job_id,
                             **inventory_result)
             except Exception as e:
                 logger.warning("image_inventory_failed",
@@ -132,7 +132,7 @@ async def process_package_files(package_id: str, package_internal_id: str, inbox
                 package_id, package_internal_id, monthly_batch, package_name, inbox_path
             )
             logger.info("extraction_completed",
-                        package_id=package_id, job_id=job_id,
+                        job_id=job_id,
                         **extraction_result)
 
             # Update job status to completed
@@ -151,12 +151,11 @@ async def process_package_files(package_id: str, package_internal_id: str, inbox
             })
 
             logger.info("package_processing_completed",
-                        package_id=package_id, job_id=job_id,
+                        job_id=job_id,
                         files=len(items_data), retry_count=retry_count)
 
         except Exception as e:
             logger.error("package_processing_failed",
-                         package_id=package_id, job_id=job_id,
                          error=str(e), retry_count=retry_count)
 
             retries_remain = await storage.increment_job_retry(UUID(job_id))
@@ -168,8 +167,7 @@ async def process_package_files(package_id: str, package_internal_id: str, inbox
                     "error_message": str(e),
                 })
                 logger.warning("package_processing_retry_scheduled",
-                               package_id=package_id, job_id=job_id,
-                               retry_count=retry_count + 1, error=str(e))
+                               error=str(e))
             else:
                 # Exhausted: dead letter so failed work remains diagnosable + recoverable
                 await storage.mark_job_dead_letter(UUID(job_id), error_message=str(e))
@@ -178,7 +176,7 @@ async def process_package_files(package_id: str, package_internal_id: str, inbox
                     "error_message": str(e),
                 })
                 logger.error("package_processing_dead_lettered",
-                             package_id=package_id, job_id=job_id,
+                             job_id=job_id,
                              error=str(e), retry_count=retry_count)
 
 
