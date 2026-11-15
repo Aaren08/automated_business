@@ -42,6 +42,9 @@ class NormalizedProduct:
     package_quantity: Optional[int] = None
     master_carton_quantity: Optional[int] = None
     package_type: Optional[str] = None
+
+    # Extraction confidence (carried from the candidate for price-entry scoring)
+    extraction_confidence: float = 0.0
     
     # Validation
     validation_errors: list[str] = None
@@ -122,6 +125,7 @@ class ProductNormalizer:
         
         # Attributes
         normalized.attributes = self._normalize_attributes(candidate.attributes)
+        normalized.extraction_confidence = float(candidate.extraction_confidence or 0.0)
         
         # Price
         normalized.price_amount = self._normalize_price(candidate.price_amount, errors)

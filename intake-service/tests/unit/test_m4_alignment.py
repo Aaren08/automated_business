@@ -737,9 +737,8 @@ class MockStorage:
             "error_message": None,
         })
 
-    async def get_product_by_source_item(self, batch_item_id, candidate_key):
-        key = (batch_item_id, candidate_key)
-        product_id = self.source_mappings.get(key)
+    async def get_product_by_source_document(self, source_document_id: str):
+        product_id = self.source_mappings.get(source_document_id)
         if product_id:
             return self.products_by_id.get(product_id)
         return None
@@ -789,13 +788,12 @@ class MockStorage:
             self.products_by_supplier_sku[supplier_sku].append(product_data)
         return product_data
 
-    async def create_product_source_mapping(self, product_id, batch_item_id, candidate_key):
-        key = (batch_item_id, candidate_key)
-        self.source_mappings[key] = product_id
+    async def create_product_source_document_link(self, product_id, source_document_id, extraction_run_id=None):
+        self.source_mappings[source_document_id] = product_id
         if product_id not in self.reverse_mappings:
             self.reverse_mappings[product_id] = []
-        self.reverse_mappings[product_id].append(key)
-        return {"product_id": product_id, "batch_item_id": batch_item_id, "candidate_key": candidate_key}
+        self.reverse_mappings[product_id].append(source_document_id)
+        return {"product_id": product_id, "source_document_id": source_document_id}
 
     async def price_history_exists(self, product_id, package_id, source_batch_item_id, effective_date, price_amount):
         for ph in self.price_history:
@@ -990,8 +988,8 @@ def test_e2e_brand_added_later_updates_existing():
             "canonical_name": "Widget",
         }
         storage.products_by_id[first_id] = storage.products[first_internal_sku]
-        asyncio.run(storage.create_product_source_mapping(
-            first_id, "item-001", "line:1"
+        asyncio.run(storage.create_product_source_document_link(
+            first_id, "item-001"
         ))
         asyncio.run(extraction_pipeline.process_package(
             package_id="pkg-001",
@@ -1058,8 +1056,8 @@ def test_e2e_price_change_preserves_identity():
         }
         storage.products_by_id[first_id] = storage.products[first_product["internal_sku"]]
 
-        asyncio.run(storage.create_product_source_mapping(
-            first_id, "item-001", "line:1"
+        asyncio.run(storage.create_product_source_document_link(
+            first_id, "item-001"
         ))
         asyncio.run(extraction_pipeline.process_package(
             package_id="pkg-001",
@@ -1283,8 +1281,8 @@ def test_e2e_price_history_idempotency():
         storage.products.clear()
         storage.products_by_id.clear()
         storage.products_by_supplier_sku.clear()
-        asyncio.run(storage.create_product_source_mapping(
-            first_id, "item-001", "line:1"
+        asyncio.run(storage.create_product_source_document_link(
+            first_id, "item-001"
         ))
         # Also need the product in by_id lookup
         storage.products_by_id[first_id] = {
@@ -1363,8 +1361,8 @@ def test_e2e_candidate_key_changed_finds_by_internal_sku():
             "canonical_name": "Widget",
         }
         storage.products_by_id[first_id] = storage.products[first_internal_sku]
-        asyncio.run(storage.create_product_source_mapping(
-            first_id, "item-001", "line:1"
+        asyncio.run(storage.create_product_source_document_link(
+            first_id, "item-001"
         ))
 
         # Second run: same product extracted at NEW candidate key "line:2"

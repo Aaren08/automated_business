@@ -12,8 +12,9 @@ Product identity:
 - internal_sku: our canonical identity, generated once from stable attributes, never recomputed.
 - supplier_sku: exclusively the identifier explicitly supplied by a source document.
 - Upsert conflict key is internal_sku, never supplier_sku.
-- Durable source-to-product mapping via product_source_items table: a source batch item
-  can map to multiple products, and a product can be mapped from multiple source items.
+- Durable source-to-product mapping via product_source_document_links table: a
+  source document can map to multiple products, and a product can be mapped
+  from multiple source documents.
 """
 
 import hashlib
@@ -213,12 +214,59 @@ class ExtractionPipeline:
             results["images_flagged_for_review"] = image_match_results["flagged_for_review"]
             results["images_unmatched"] = image_match_results["unmatched"]
 
-            # 6. Mark all extraction runs as succeeded
+            # 6. Mark extraction runs truthfully with the full extracted payload.
+            #    Build the per-source-document extracted payload from the
+            #    candidates extracted from each source document (audit #8).
+            candidates_by_sd: dict[str, list[dict]] = {}
+            for c in product_candidates:
+                sd = source_document_map.get(str(c.source_batch_item_id)) if c.source_batch_item_id else None
+                if sd:
+                    candidates_by_sd.setdefault(sd, []).append({
+                        "canonical_name": c.canonical_name,
+                        "supplier_sku": c.supplier_sku,
+                        "supplier_product_name": c.supplier_product_name,
+                        "category": c.category,
+                        "brand": c.brand,
+                        "model": c.model,
+                        "price_amount": c.price_amount,
+                        "price_currency": c.price_currency,
+                        "price_unit": c.price_unit,
+                        "attributes": c.attributes,
+                        "raw_source_text": c.raw_source_text,
+                        "source_location": c.source_location,
+                        "extraction_method": c.extraction_method,
+                        "extraction_confidence": c.extraction_confidence,
+                    })
+
+            failed_source_docs = upsert_results.get("failed_source_doc_ids", set())
+            failed = upsert_results["failed"]
+            flagged = upsert_results["flagged_review"]
+
             for source_doc_id, run_id in extraction_runs.items():
+                docs_candidates = candidates_by_sd.get(source_doc_id, [])
+                payload = {
+                    "products": docs_candidates,
+                    "product_count": len(docs_candidates),
+                    "source_document_id": source_doc_id,
+                }
+                # Truthful status per the audit contract (#13).
+                if source_doc_id in failed_source_docs:
+                    status = "failed"
+                elif flagged:
+                    status = "needs_review"
+                elif len(docs_candidates) > 0:
+                    status = "succeeded"
+                else:
+                    # Source document persisted but no product could be
+                    # extracted from it (e.g. no recognizable product content).
+                    # Keep the source + run for review rather than dropping it.
+                    status = "partial"
                 try:
                     await storage.update_product_extraction_run(UUID(run_id), {
-                        "status": "succeeded",
+                        "status": status,
+                        "extracted_payload": payload,
                         "completed_at": datetime.utcnow().isoformat(),
+                        "confidence": None,
                     })
                 except Exception as e:
                     logger.warning("extraction_run_update_failed",
@@ -303,7 +351,7 @@ class ExtractionPipeline:
         """Normalize candidates and upsert to database with internal_sku identity.
 
         Identity resolution order:
-        1. Check product_source_items mapping by (batch_item_id, candidate_key)
+        1. Check product_source_document_links mapping by source_document_id
            → if found, use existing product_id and its persisted internal_sku.
         2. If no source mapping, compute internal_sku from stable attributes
            and look up by internal_sku → if found, update existing product.
@@ -311,19 +359,17 @@ class ExtractionPipeline:
            (multiple products sharing supplier_sku → flag for review).
         4. If no match at all, insert new product with computed internal_sku.
 
-        After product is resolved, create product_source_items mapping AND
+        After product is resolved, create product_source_document_links mapping AND
         universal product schema child records: variants, prices, options,
         facts, fulfilment terms, media links.
 
-        Candidate-key stability:
-        candidate_key (e.g. "table:0,row:2" or "line:5") is derived from
-        extraction position. It is NOT stable when source content changes.
-        When a candidate_key changes between extractions, the source mapping
-        is not found and the pipeline falls through to Step 2 (internal_sku
-        lookup). If the internal_sku matches, the existing product is updated.
-        If not, a new product is created. This is the correct behavior:
-        internal_sku (from stable attributes) is the durable identity, not
-        the extraction position.
+        Source-document mapping:
+        The source_document_id (derived from the info.md batch item) is the
+        durable link between a source document and its product. It is stable
+        across reprocessing of the same source document, so the mapping is
+        found on repeat runs and the existing product is updated.
+        internal_sku (from stable attributes) is the durable product identity,
+        not the extraction position.
 
         internal_sku is generated once on insert and NEVER changed on update.
         supplier_sku comes exclusively from source data, never computed.
@@ -340,6 +386,9 @@ class ExtractionPipeline:
             "fulfilment_terms_created": 0,
             "media_links_created": 0,
             "source_document_links_created": 0,
+            # Track which source documents had failures so extraction-run
+            # status can be set truthfully per source document (audit #13).
+            "failed_source_doc_ids": set(),
         }
 
         for candidate in candidates:
@@ -370,9 +419,13 @@ class ExtractionPipeline:
                 # ------------------------------------------------------------------
                 # Step 1: Check durable source-to-product mapping first
                 # ------------------------------------------------------------------
-                existing_mapping = await storage.get_product_by_source_item(
-                    batch_item_id, candidate_key
-                )
+                # Prefer source_document_id (set in production by routes.py when
+                # persisting source documents); fall back to batch_item_id when
+                # source_document_id is not yet available (e.g. tests).
+                lookup_key = source_doc_id or batch_item_id
+                existing_mapping = await storage.get_product_by_source_document(
+                    lookup_key
+                ) if lookup_key else None
 
                 product = None
                 internal_sku = None
@@ -489,35 +542,22 @@ class ExtractionPipeline:
                 # ------------------------------------------------------------------
                 # Step 3: Record source-to-product mapping
                 # ------------------------------------------------------------------
-                if product and batch_item_id:
+                # Link product to source document and extraction run
+                if product and source_doc_id:
                     product_id = str(product["id"])
                     try:
-                        await storage.create_product_source_mapping(
-                            product_id, batch_item_id, candidate_key
-                        )
+                        await storage.insert_product_source_document_link({
+                            "product_id": product_id,
+                            "source_document_id": source_doc_id,
+                            "extraction_run_id": extraction_run_id,
+                            "relationship": "derived_from",
+                        })
+                        results["source_document_links_created"] += 1
                     except Exception as e:
-                        # Mapping creation is best-effort; don't fail the product
-                        logger.warning("mapping_creation_failed",
+                        logger.warning("source_document_link_creation_failed",
                                        product_id=product_id,
-                                       batch_item_id=batch_item_id,
-                                       candidate_key=candidate_key,
+                                       source_document_id=source_doc_id,
                                        error=str(e))
-
-                    # Link product to source document and extraction run
-                    if source_doc_id:
-                        try:
-                            await storage.insert_product_source_document_link({
-                                "product_id": product_id,
-                                "source_document_id": source_doc_id,
-                                "extraction_run_id": extraction_run_id,
-                                "relationship": "derived_from",
-                            })
-                            results["source_document_links_created"] += 1
-                        except Exception as e:
-                            logger.warning("source_document_link_creation_failed",
-                                           product_id=product_id,
-                                           source_document_id=source_doc_id,
-                                           error=str(e))
 
                     # Create universal product schema child records
                     try:
@@ -590,6 +630,13 @@ class ExtractionPipeline:
                         results["price_entries"] += 1
 
             except Exception as e:
+                # Record which source document failed so its extraction run
+                # can be marked truthfully (audit #13).
+                failed_sd = source_document_map.get(
+                    str(candidate.source_batch_item_id)
+                ) if candidate.source_batch_item_id else None
+                if failed_sd:
+                    results["failed_source_doc_ids"].add(failed_sd)
                 logger.error("product_upsert_failed",
                              internal_sku=internal_sku if 'internal_sku' in locals() else None,
                              supplier_sku=candidate.supplier_sku,
@@ -682,7 +729,7 @@ class ExtractionPipeline:
             "batch_id": str(package_internal_id),
             "monthly_batch": monthly_batch,
             "supplier_product_name": normalized.supplier_product_name,
-            "canonical_name": normalized.canonical_name,
+            "canonical_name": self._fallback_canonical_name(normalized),
             "description": normalized.description,
             "category": normalized.category,
             "brand": normalized.brand,
@@ -690,7 +737,7 @@ class ExtractionPipeline:
             "attributes": normalized.attributes,
             "structured_data": structured_data,
             "product_type": normalized.category,
-            "source_title": normalized.canonical_name,
+            "source_title": self._fallback_canonical_name(normalized),
             "publication_status": "draft",
             "price_amount": float(normalized.price_amount) if normalized.price_amount else None,
             "price_currency": normalized.price_currency,
@@ -739,7 +786,7 @@ class ExtractionPipeline:
             "batch_id": str(package_internal_id),
             "monthly_batch": monthly_batch,
             "supplier_product_name": normalized.supplier_product_name,
-            "canonical_name": normalized.canonical_name,
+            "canonical_name": self._fallback_canonical_name(normalized),
             "description": normalized.description,
             "category": normalized.category,
             "brand": normalized.brand,
@@ -747,7 +794,7 @@ class ExtractionPipeline:
             "attributes": normalized.attributes,
             "structured_data": structured_data,
             "product_type": normalized.category,
-            "source_title": normalized.canonical_name,
+            "source_title": self._fallback_canonical_name(normalized),
             "publication_status": "draft",
             "price_amount": float(normalized.price_amount) if normalized.price_amount else None,
             "price_currency": normalized.price_currency,
@@ -775,6 +822,22 @@ class ExtractionPipeline:
         }
 
 
+
+    def _fallback_canonical_name(self, normalized: NormalizedProduct) -> str:
+        """Return a non-null canonical_name fallback chain.
+
+        The live products table has canonical_name NOT NULL. Extraction may
+        yield no name (price-only table rows, unclassified lines). Rather than
+        fail the insert, fall back through supplier_product_name, supplier_sku,
+        and finally a generic placeholder so draft products can still be saved.
+        """
+        if normalized.canonical_name:
+            return normalized.canonical_name
+        if normalized.supplier_product_name:
+            return normalized.supplier_product_name
+        if normalized.supplier_sku:
+            return normalized.supplier_sku
+        return "Untitled Product"
 
     def _build_structured_data(
         self,

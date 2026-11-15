@@ -98,28 +98,56 @@ class ProductExtractor:
     }
 
     def extract_from_markdown(self, parsed: ParsedContent, source_file: str) -> list[ProductCandidate]:
-        """Extract products from markdown parsed content."""
+        """Extract products from markdown parsed content.
+
+        Product candidates come from three sources, in order:
+        1. Lines carrying prices (products_raw) - full extraction incl. price.
+        2. Markdown tables (product_tables) - row-based extraction.
+        3. Unclassified content lines that look like products - draft
+           candidates WITHOUT a price, so a product with zero recognized
+           prices is still saved as a draft (audit req #5 / criterion #8).
+
+        Nothing is dropped: lines that do not become candidates remain in
+        unclassified_content and are stored on the extraction run.
+        """
         candidates = []
         metadata = parsed.metadata or {}
-        
-        # From raw product lines
+
+        # 1. From raw product lines (lines carrying prices)
         for i, line in enumerate(metadata.get('products_raw', [])):
             candidate = self._extract_from_line(line, f"{source_file}:line:{i}", 'markdown')
             if candidate:
                 candidates.append(candidate)
-        
-        # From tables
+
+        # 2. From tables
+        seen_texts = {c.raw_source_text for c in candidates if c.raw_source_text}
         for table_idx, table in enumerate(metadata.get('product_tables', [])):
-            candidates = self._extract_from_table(table, f"{source_file}:table:{table_idx}", 'markdown_table')
-            candidates.extend(candidates)
-        
+            table_candidates = self._extract_from_table(table, f"{source_file}:table:{table_idx}", 'markdown_table')
+            for c in table_candidates:
+                if c.raw_source_text and c.raw_source_text in seen_texts:
+                    continue
+                seen_texts.add(c.raw_source_text)
+                candidates.append(c)
+
+        # 3. From unclassified content lines that look like products -> drafts
+        for entry in metadata.get('unclassified_content', []):
+            text = entry.get('text') if isinstance(entry, dict) else str(entry)
+            if not text or text in seen_texts:
+                continue
+            candidate = self._extract_from_line(
+                text, f"{source_file}:unclassified:{entry.get('line_no', '?') if isinstance(entry, dict) else '?'}", 'markdown'
+            )
+            if candidate:
+                seen_texts.add(text)
+                candidates.append(candidate)
+
         # Supplier info from metadata
         supplier_name = metadata.get('supplier_name')
         delivery_areas = metadata.get('delivery_areas', [])
-        
+
         for c in candidates:
             c.extraction_notes = f"Supplier: {supplier_name}; Delivery: {', '.join(delivery_areas)}"
-        
+
         return candidates
 
     def extract_from_pdf(self, parsed: ParsedContent, source_file: str) -> list[ProductCandidate]:
@@ -157,54 +185,82 @@ class ProductExtractor:
         return candidates
 
     def _extract_from_line(self, line: str, location: str, method: str) -> Optional[ProductCandidate]:
-        """Extract product info from a single line of text."""
+        """Extract product info from a single line of text.
+
+        A line becomes a product candidate when it carries a price, a SKU, or
+        a product-looking name. Price is OPTIONAL: a name-only line still
+        yields a draft candidate so a product with zero recognized prices can
+        be saved as a draft (audit requirement #5 / acceptance criterion #8).
+        Lines that are clearly noise (greetings, short headers) are not kept
+        and stay as unclassified content.
+        """
         line = line.strip()
         if not line or len(line) < 5:
             return None
-        
+
         candidate = ProductCandidate(
-            source_file=location.split(':')[0] if ':' in location else None,
+            source_file=location.split(":")[0] if ":" in location else None,
             source_location=location,
             extraction_method=method,
             raw_source_text=line,
         )
-        
+
+        has_price = False
         # Extract price - try both patterns
         price_match = self.PRICE_PATTERN.search(line)
         if not price_match:
             price_match = self.TRAILING_PRICE_PATTERN.search(line)
-        
+
         if price_match:
-            price_str = price_match.group(1).replace(',', '')
+            has_price = True
+            price_str = price_match.group(1).replace(",", "")
             try:
                 candidate.price_amount = float(price_str)
             except ValueError:
                 pass
-            
+
             # Extract currency
             for symbol, code in self.CURRENCY_MAP.items():
                 if symbol in line:
                     candidate.price_currency = code
                     break
-            
+
             # Extract unit
             unit_match = self.UNIT_PATTERN.search(line)
             if unit_match:
-                candidate.price_unit = unit_match.group(0).replace('per ', '').replace('/', '').strip()
-        
+                candidate.price_unit = unit_match.group(0).replace("per ", "").replace("/", "").strip()
+
         # Extract SKU
         sku_match = self.SKU_PATTERN.search(line)
+        has_sku = False
         if sku_match:
+            has_sku = True
             candidate.supplier_sku = sku_match.group(1)
-        
+
         # Extract product name (text before/after price)
         candidate.supplier_product_name = self._extract_product_name(line, price_match)
+        has_name = bool(candidate.supplier_product_name)
         if candidate.supplier_product_name:
             candidate.canonical_name = self._normalize_name(candidate.supplier_product_name)
-        
+
         # Infer category
         candidate.category = self._infer_category(line)
-        
+        has_category = bool(candidate.category)
+
+        # Decide whether this line is a product candidate.
+        # Always keep price or SKU lines. Keep name-only lines only when they
+        # look like a real product (multi-word, not a greeting/noise line) so
+        # noise stays unclassified.
+        keep = False
+        if has_price or has_sku:
+            keep = True
+        elif has_name and len(candidate.supplier_product_name.split()) >= 2:
+            first_word = candidate.supplier_product_name.split()[0].lower()
+            noise = {"thank", "thanks", "regards", "sincerely", "best", "cheers", "hello", "hi"}
+            keep = first_word not in noise
+        if not keep:
+            return None
+
         # Calculate confidence
         confidence = 0.0
         if candidate.price_amount is not None:
@@ -218,8 +274,28 @@ class ProductExtractor:
         if candidate.price_currency:
             confidence += 0.1
         candidate.extraction_confidence = min(confidence, 1.0)
-        
-        return candidate if confidence > 0.1 else None
+
+        return candidate
+
+    def _extract_product_name(self, line: str, price_match: Optional[re.Match]) -> Optional[str]:
+        """Extract product name from line by removing price and noise.
+
+        When there is no price, the whole line is considered only if it looks
+        like a product name; otherwise None so the line stays unclassified.
+        """
+        name = line[: price_match.start()].strip() if price_match else line.strip()
+        # Remove emojis and markdown symbols
+        name = re.sub(r"[\U0001F300-\U0001FAFF\U00002600-\U000027BF]", "", name)  # emojis
+        name = re.sub(r"^[\*\-\•\🔅\✨\s]+", "", name)
+        name = re.sub(r"[\$\€\£]\s*\d+(?:[.,]\d{2})?\s*", "", name)
+        name = re.sub(r"\d+(?:[.,]\d{2})?\s*[\$\€\£]\s*", "", name)  # trailing price
+        name = name.strip(" \t\r\n*-\•").strip()
+        if not name or len(name) < 3:
+            return None
+        # Avoid turning pure numeric / symbol noise into a name.
+        if re.match(r"^[\d\$\€\£\s\.\,\*]+$", name):
+            return None
+        return name[:200]
 
     def _extract_from_table(self, table: list[list[str]], location: str, method: str) -> list[ProductCandidate]:
         """Extract products from a table (list of rows)."""

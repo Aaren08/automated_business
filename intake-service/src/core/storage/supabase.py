@@ -409,54 +409,45 @@ class SupabaseStorage:
             raise Exception("Failed to insert product media link")
         return result.data[0]
 
-    # ===== Product-to-Source-Item Mapping =====
+    # ===== Product-to-Source-Document Mapping =====
 
-    async def get_product_by_source_item(
-        self, batch_item_id: str, candidate_key: str
+    async def get_product_by_source_document(
+        self, source_document_id: str
     ) -> Optional[dict]:
-        """Find the canonical product mapped to a source item candidate.
+        """Find the canonical product linked to a source document.
 
-        Looks up the product_source_items mapping by (batch_item_id, candidate_key).
-        Returns the product record if a mapping exists, None otherwise.
-
-        candidate_key is a stable identifier within a source item (e.g.,
-        "table:0,row:2" or "line:5"), not the candidate's position in a list.
+        Looks up the product_source_document_links mapping by
+        source_document_id. Returns the product record if a mapping exists,
+        None otherwise.
         """
         result = (
-            self.client.table("product_source_items")
+            self.client.table("product_source_document_links")
             .select("*, products(*)")
-            .eq("batch_item_id", batch_item_id)
-            .eq("candidate_key", candidate_key)
+            .eq("source_document_id", source_document_id)
             .execute()
         )
         if not result.data:
             return None
-        mapping = result.data[0]
-        return mapping.get("products")
+        link = result.data[0]
+        return link.get("products")
 
-    async def create_product_source_mapping(
-        self, product_id: str, batch_item_id: str, candidate_key: str
-    ) -> dict:
-        """Record that a source item candidate maps to a canonical product.
+    async def insert_product_source_document_link(self, link_data: dict) -> dict:
+        """Link a product to a source document and extraction run (idempotent).
 
-        Idempotent: upserts on (product_id, batch_item_id, candidate_key).
+        Upserts on (product_id, source_document_id) so reprocessing is safe
+        and never creates duplicate links.
         """
-        result = self.client.table("product_source_items").upsert(
-            {
-                "product_id": product_id,
-                "batch_item_id": batch_item_id,
-                "candidate_key": candidate_key,
-            },
-            on_conflict="batch_item_id,candidate_key",
+        result = self.client.table("product_source_document_links").upsert(
+            link_data, on_conflict="product_id,source_document_id"
         ).execute()
         if not result.data:
-            raise Exception("Failed to create product-source mapping")
+            raise Exception("Failed to create product-source-document link")
         return result.data[0]
 
     async def list_source_items_for_product(self, product_id: str) -> list[dict]:
-        """List all source items mapped to a canonical product."""
+        """List all source documents linked to a canonical product."""
         result = (
-            self.client.table("product_source_items")
+            self.client.table("product_source_document_links")
             .select("*")
             .eq("product_id", product_id)
             .execute()

@@ -128,7 +128,7 @@ class ImageMatcher:
     ) -> Optional[ImageMatchCandidate]:
         """Match a single product image to a canonical product."""
 
-        image_id = str(image_item["id"])
+        image_id = str(image_item.get("product_image_id") or image_item["id"])
         image_name = image_item.get("original_filename", "")
         image_phash = image_item.get("perceptual_hash")
         ocr_text = image_item.get("ocr_text") or ""

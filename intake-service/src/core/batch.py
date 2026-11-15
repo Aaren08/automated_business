@@ -90,8 +90,11 @@ class BatchScanner:
     ALLOWED_EXTENSIONS = {ext.lower() for ext in settings.allowed_extensions_set}
     IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tiff", ".tif"}
 
-    def __init__(self, inbox_path: str = "/data/inbox"):
-        self.inbox_path = Path(inbox_path).resolve()
+    def __init__(self, inbox_path: Optional[str] = None):
+        # Resolve the inbox from the configured Obsidian supplier path first,
+        # falling back to the Docker-mounted /data/inbox for local/dev runs.
+        resolved = inbox_path or settings.OBSIDIAN_SUPPLIER_PATH or "/data/inbox"
+        self.inbox_path = Path(resolved).resolve()
 
     # ------------------------------------------------------------------
     # Batch discovery (monthly folders)
@@ -222,9 +225,11 @@ class BatchScanner:
             # Skip ready markers
             if name_lower == self.READY_MARKER or name_lower.startswith("_ready"):
                 continue
-            # Skip info.md (handled separately)
-            if name_lower == self.INFO_MD:
-                continue
+            # info.md is collected as a regular markdown package file so its
+            # content flows through parsing -> raw source persistence ->
+            # product extraction into the Supabase universal product tables.
+            # (Previously skipped here with "handled separately", but it was
+            # never handled separately, so info.md content never reached Supabase.)
             if file_path.name.startswith("."):
                 continue
             if file_path.suffix.lower() not in self.ALLOWED_EXTENSIONS:

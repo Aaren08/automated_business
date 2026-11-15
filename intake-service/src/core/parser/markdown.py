@@ -95,12 +95,20 @@ class MarkdownParser(BaseParser):
         return tables
 
     def _extract_supplier_info(self, text: str, tables: list[list[list[str]]]) -> dict[str, Any]:
-        """Extract supplier name, contact, products from text."""
+        """Extract supplier name, contact, products from text.
+
+        All source content is accounted for: product price lines go into
+        ``products_raw``, structured tables into ``product_tables``,
+        delivery-area lines into ``delivery_areas``, and every remaining
+        line/block that is not clearly product, price, or delivery content is
+        retained in ``unclassified_content`` so nothing is dropped.
+        """
         info = {
             "supplier_name": None,
             "contact": {},
             "products_raw": [],
             "delivery_areas": [],
+            "unclassified_content": [],
             "notes": "",
         }
 
@@ -113,17 +121,44 @@ class MarkdownParser(BaseParser):
                 info["supplier_name"] = line[:200]
                 break
 
-        # Extract product lines (lines with prices)
-        price_pattern = re.compile(r"[\$\€\£]\s*\d+(?:[.,]\d{2})?|\d+(?:[.,]\d{2})?\s*[\$\€\£]")
-        for line in lines:
-            if price_pattern.search(line):
-                info["products_raw"].append(line.strip())
+        # Build a set of table cell text so table content is not double-counted
+        # as unclassified when it is already captured structurally.
+        table_text: set[str] = set()
+        for table in tables or []:
+            for row in table:
+                for cell in row:
+                    if cell and cell.strip():
+                        table_text.add(cell.strip())
 
-        # Extract delivery areas
         delivery_keywords = ["deliver", "delivery", "ship", "shipping", "dallas", "houston", "austin", "waco", "oklahoma"]
-        for line in lines:
-            if any(kw in line.lower() for kw in delivery_keywords):
-                info["delivery_areas"].append(line.strip())
+        price_pattern = re.compile(r"[\$\€\£]\s*\d+(?:[.,]\d{2})?|\d+(?:[.,]\d{2})?\s*[\$\€\£]")
+
+        for line_no, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            # Price lines are product candidates (captured in products_raw).
+            if price_pattern.search(stripped):
+                info["products_raw"].append(stripped)
+                continue
+
+            # Delivery / geographic coverage lines -> fulfilment terms, not products.
+            if any(kw in stripped.lower() for kw in delivery_keywords):
+                info["delivery_areas"].append(stripped)
+                continue
+
+            # Table cell content is already captured structurally.
+            if stripped in table_text:
+                continue
+
+            # Obvious short headers / marketing / closing noise -> unclassified
+            # but retained; not turned into a product candidate.
+            info["unclassified_content"].append({
+                "type": "line",
+                "line_no": line_no,
+                "text": stripped[:500],
+            })
 
         # Use tables for structured product data
         if tables:

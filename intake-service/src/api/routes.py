@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from src.core.batch import BatchScanner, PackageInfo
+from src.config import settings
 from src.core.parser import parser_registry
 from src.core.storage.supabase import (
     MAX_RETRIES,
@@ -32,16 +33,27 @@ logger = structlog.get_logger()
 scanner = BatchScanner()
 
 
-async def process_package_files(package_id: str, package_internal_id: str, inbox_path: str = "/data/inbox"):
+async def process_package_files(
+    package_id: str,
+    package_internal_id: str,
+    inbox_path: Optional[str] = None,
+):
     """Background task to parse files and extract products for a package.
 
     Reliability (M8): bounded retries with dead-lettering, stale-lock safe,
     and structured logging. Reuses M6 tenacity retry tuning (MAX_RETRIES).
+
+    The inbox is resolved from the configured Obsidian supplier path
+    (``OBSIDIAN_SUPPLIER_PATH``) so info.md files stored there are discovered
+    and persisted to Supabase. Falls back to ``/data/inbox`` for local/Docker runs.
     """
     logger = structlog.get_logger().bind(
         package_id=package_id,
         package_internal_id=package_internal_id,
     )
+
+    # Resolve the inbox: explicit argument > configured Obsidian supplier path > default.
+    resolved_inbox = inbox_path or settings.OBSIDIAN_SUPPLIER_PATH or "/data/inbox"
 
     async with get_supabase() as storage:
         job = await storage.get_latest_job_for_batch(package_id)
@@ -68,7 +80,7 @@ async def process_package_files(package_id: str, package_internal_id: str, inbox
             package_name = package.get("package_name", "")
 
             # Collect and parse files
-            temp_scanner = BatchScanner(inbox_path)
+            temp_scanner = BatchScanner(resolved_inbox)
             package_info = None
             for p in temp_scanner.scan_packages():
                 if p.package_id == package_id:
@@ -79,7 +91,7 @@ async def process_package_files(package_id: str, package_internal_id: str, inbox
                 raise Exception(f"Package not found in inbox: {package_id}")
 
             # Parse each file in the package
-            package_path = Path(inbox_path) / source_path
+            package_path = Path(resolved_inbox) / source_path
             files = temp_scanner._collect_package_files(package_path)
 
             items_data = []
@@ -123,13 +135,17 @@ async def process_package_files(package_id: str, package_internal_id: str, inbox
                 if item.get("source_document_id"):
                     source_document_map[item_id] = item["source_document_id"]
                     continue  # already persisted on a previous run
-                file_path = Path(inbox_path) / source_path / item["file_path"]
+                file_path = Path(resolved_inbox) / source_path / item["file_path"]
                 try:
                     raw_bytes = file_path.read_bytes()
                     content = raw_bytes.decode("utf-8")
                     encoding = "utf-8"
                     decoding_errors = None
                 except UnicodeDecodeError as e:
+                    # Strict UTF-8 failed. Record the decoding error so it is
+                    # surfaced on the extraction run (never silently replaced
+                    # as successful). Fall back to replacement decoding only so
+                    # the source document can still be persisted and parsed.
                     content = raw_bytes.decode("utf-8", errors="replace")
                     encoding = "utf-8 (replacement)"
                     decoding_errors = [f"Strict UTF-8 decode failed: {e}"]
@@ -427,17 +443,6 @@ async def process_batch(batch_id: str, background_tasks: BackgroundTasks):
 
     # Queue background processing
     background_tasks.add_task(process_package_files, batch_id, batch["id"])
-
-    return JobStatus(
-        job_id=UUID(job["id"]),
-        batch_id=batch_id,
-        job_type="process",
-        status="pending",
-        started_at=job.get("started_at"),
-        completed_at=job.get("completed_at"),
-        error_message=job.get("error_message"),
-        result_summary=job.get("result_summary"),
-    )
 
     return JobStatus(
         job_id=UUID(job["id"]),

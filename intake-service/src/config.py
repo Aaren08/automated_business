@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     INTAKE_API_KEY: str
 
+    # Supplier inbox (Obsidian vault supplier inbox). info.md files discovered
+    # here are persisted to Supabase raw source documents and extracted into
+    # the universal product schema tables.
+    OBSIDIAN_SUPPLIER_PATH: Optional[str] = None
+
     # Supabase
     SUPABASE_URL: str
     SUPABASE_SERVICE_KEY: str
