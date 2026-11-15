@@ -283,6 +283,132 @@ class SupabaseStorage:
             raise Exception(f"Product not found: {product_id}")
         return result.data[0]
 
+    # ===== Universal Product Schema Operations =====
+
+    async def insert_product_source_document(
+        self,
+        source_document_data: dict,
+    ) -> dict:
+        """Persist an original source document unchanged before any parsing.
+
+        This is the first step of ingestion: raw bytes/content are stored
+        immutably so that extraction failures never lose source data.
+        """
+        result = self.client.table("product_source_documents").insert(
+            source_document_data
+        ).execute()
+        if not result.data:
+            raise Exception("Failed to insert product source document")
+        return result.data[0]
+
+    async def get_product_source_document(
+        self, source_document_id: UUID
+    ) -> Optional[dict]:
+        """Get a source document by ID."""
+        result = (
+            self.client.table("product_source_documents")
+            .select("*")
+            .eq("id", str(source_document_id))
+            .execute()
+        )
+        return result.data[0] if result.data else None
+
+    async def insert_product_extraction_run(
+        self, extraction_run_data: dict
+    ) -> dict:
+        """Create a versioned extraction run record.
+
+        Failed/incomplete extraction never destroys source data - the run
+        record captures status, warnings, errors, and the full payload.
+        """
+        result = self.client.table("product_extraction_runs").insert(
+            extraction_run_data
+        ).execute()
+        if not result.data:
+            raise Exception("Failed to insert product extraction run")
+        return result.data[0]
+
+    async def update_product_extraction_run(
+        self, extraction_run_id: UUID, updates: dict
+    ) -> dict:
+        """Update an extraction run (e.g., mark succeeded/failed/needs_review)."""
+        result = (
+            self.client.table("product_extraction_runs")
+            .update(updates)
+            .eq("id", str(extraction_run_id))
+            .execute()
+        )
+        if not result.data:
+            raise Exception(f"Extraction run not found: {extraction_run_id}")
+        return result.data[0]
+
+    async def insert_product_source_document_link(
+        self, link_data: dict
+    ) -> dict:
+        """Link a product to a source document and extraction run."""
+        result = self.client.table("product_source_document_links").insert(
+            link_data
+        ).execute()
+        if not result.data:
+            raise Exception("Failed to insert product source document link")
+        return result.data[0]
+
+    async def insert_product_variant(self, variant_data: dict) -> dict:
+        """Insert a product variant (size, colour, model, configuration)."""
+        result = self.client.table("product_variants").insert(
+            variant_data
+        ).execute()
+        if not result.data:
+            raise Exception("Failed to insert product variant")
+        return result.data[0]
+
+    async def insert_product_price_entry(self, price_data: dict) -> dict:
+        """Insert a flexible price entry. Amount/currency nullable; raw_price_text mandatory."""
+        result = self.client.table("product_price_entries").insert(
+            price_data
+        ).execute()
+        if not result.data:
+            raise Exception("Failed to insert product price entry")
+        return result.data[0]
+
+    async def insert_product_option(self, option_data: dict) -> dict:
+        """Insert an optional/add-on item or service."""
+        result = self.client.table("product_options").insert(
+            option_data
+        ).execute()
+        if not result.data:
+            raise Exception("Failed to insert product option")
+        return result.data[0]
+
+    async def insert_product_fact(self, fact_data: dict) -> dict:
+        """Insert an arbitrary fact/feature/claim with provenance."""
+        result = self.client.table("product_facts").insert(
+            fact_data
+        ).execute()
+        if not result.data:
+            raise Exception("Failed to insert product fact")
+        return result.data[0]
+
+    async def insert_product_fulfilment_terms(
+        self, terms_data: dict
+    ) -> dict:
+        """Insert delivery/fulfilment/geographic/payment terms."""
+        result = self.client.table("product_fulfilment_terms").insert(
+            terms_data
+        ).execute()
+        if not result.data:
+            raise Exception("Failed to insert product fulfilment terms")
+        return result.data[0]
+
+    async def insert_product_media_link(self, media_data: dict) -> dict:
+        """Link a product to an image or external media asset."""
+        result = self.client.table("product_media_links").insert(
+            media_data
+        ).execute()
+        if not result.data:
+            raise Exception("Failed to insert product media link")
+        return result.data[0]
+
     # ===== Product-to-Source-Item Mapping =====
 
     async def get_product_by_source_item(

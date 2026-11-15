@@ -15,10 +15,24 @@ class MarkdownParser(BaseParser):
         return file_path.suffix.lower() in {".md", ".markdown"}
 
     def parse(self, file_path: Path) -> ParsedContent:
+        # Read raw bytes first - preserve original content unchanged
+        raw_bytes = file_path.read_bytes()
+
+        # Strict UTF-8 decoding: never silently replace invalid bytes
+        decoding_errors: list[str] = []
         try:
-            content = file_path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            content = file_path.read_text(encoding="utf-8", errors="replace")
+            content = raw_bytes.decode("utf-8")
+            encoding = "utf-8"
+        except UnicodeDecodeError as e:
+            # Record the error but do not silently corrupt the content.
+            # Decode with errors="replace" only as a last resort so the file
+            # can still be parsed, but flag it for review.
+            decoding_errors.append(
+                f"Strict UTF-8 decode failed: {e}. "
+                f"Falling back to replacement decoding - content may be partially corrupted."
+            )
+            content = raw_bytes.decode("utf-8", errors="replace")
+            encoding = "utf-8 (replacement)"
 
         md = MarkdownIt()
         tokens = md.parse(content)
@@ -36,6 +50,9 @@ class MarkdownParser(BaseParser):
             text=text,
             tables=tables,
             metadata=metadata,
+            raw_bytes=raw_bytes,
+            encoding=encoding,
+            decoding_errors=decoding_errors if decoding_errors else None,
         )
 
     def _tokens_to_text(self, tokens: list) -> str:

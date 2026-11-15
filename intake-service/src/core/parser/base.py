@@ -12,6 +12,9 @@ class ParsedContent:
     tables: list[list[list[str]]]  # List of tables, each table is list of rows
     metadata: dict[str, Any]
     error: str | None = None
+    raw_bytes: bytes | None = None  # Original file bytes, preserved unchanged
+    encoding: str | None = None     # Detected/used encoding
+    decoding_errors: list[str] = None  # Non-fatal decoding warnings
 
 
 class BaseParser(ABC):

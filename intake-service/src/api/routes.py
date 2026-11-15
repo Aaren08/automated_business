@@ -1,4 +1,5 @@
 """API routes for the intake service."""
+import hashlib
 import structlog
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from uuid import uuid4, UUID
@@ -112,6 +113,50 @@ async def process_package_files(package_id: str, package_internal_id: str, inbox
             # Get stored items with IDs for image inventory
             stored_items = await storage.get_package_items(package_internal_id)
 
+            # Persist raw source documents before any parsing (immutable raw content).
+            # A parsing/extraction failure must never roll back the raw-source insert.
+            source_document_map = {}
+            for item in stored_items:
+                if item.get("file_type") != "markdown":
+                    continue
+                item_id = str(item.get("id"))
+                if item.get("source_document_id"):
+                    source_document_map[item_id] = item["source_document_id"]
+                    continue  # already persisted on a previous run
+                file_path = Path(inbox_path) / source_path / item["file_path"]
+                try:
+                    raw_bytes = file_path.read_bytes()
+                    content = raw_bytes.decode("utf-8")
+                    encoding = "utf-8"
+                    decoding_errors = None
+                except UnicodeDecodeError as e:
+                    content = raw_bytes.decode("utf-8", errors="replace")
+                    encoding = "utf-8 (replacement)"
+                    decoding_errors = [f"Strict UTF-8 decode failed: {e}"]
+                except Exception as e:
+                    logger.warning("raw_source_read_failed",
+                                   package_id=package_id, job_id=job_id,
+                                   file=item["file_name"], error=str(e))
+                    continue
+
+                source_doc = await storage.insert_product_source_document({
+                    "batch_id": package_internal_id,
+                    "batch_item_id": item["id"],
+                    "source_path": item["file_path"],
+                    "source_filename": item["file_name"],
+                    "mime_type": item.get("mime_type", "text/markdown"),
+                    "encoding_detected": encoding,
+                    "raw_content": content,
+                    "content_sha256": hashlib.sha256(raw_bytes).hexdigest(),
+                    "source_metadata": {
+                        "decoding_errors": decoding_errors,
+                        "file_size": item.get("file_size"),
+                        "file_hash": item.get("file_hash"),
+                    },
+                })
+                item["source_document_id"] = str(source_doc["id"])
+                source_document_map[item_id] = str(source_doc["id"])
+
             # Process image inventory (hashing, thumbnails, dedup, storage).
             # Non-fatal: a failure here is logged but does not fail the package.
             try:
@@ -129,7 +174,8 @@ async def process_package_files(package_id: str, package_internal_id: str, inbox
             # Run extraction pipeline (products only, no supplier).
             # Failures here ARE tracked: they go through bounded retry/dead-letter.
             extraction_result = await extraction_pipeline.process_package(
-                package_id, package_internal_id, monthly_batch, package_name, inbox_path
+                package_id, package_internal_id, monthly_batch, package_name, inbox_path,
+                source_document_map=source_document_map
             )
             logger.info("extraction_completed",
                         job_id=job_id,

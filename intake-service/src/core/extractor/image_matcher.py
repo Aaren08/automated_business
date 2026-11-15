@@ -184,7 +184,7 @@ class ImageMatcher:
                 continue
 
             # Try canonical_name match (case-insensitive)
-            r = await storage.client.table("products").select("id, canonical_name, supplier_sku").ilike("canonical_name", f"%{term}%").limit(5).execute()
+            r = storage.client.table("products").select("id, canonical_name, supplier_sku").ilike("canonical_name", f"%{term}%").limit(5).execute()
             if r.data:
                 for match in r.data:
                     confidence = self._compute_filename_match_confidence(
@@ -200,7 +200,7 @@ class ImageMatcher:
                         )
 
             # Try supplier_sku match
-            r = await storage.client.table("products").select("id, canonical_name, supplier_sku").eq("supplier_sku", term).limit(5).execute()
+            r = storage.client.table("products").select("id, canonical_name, supplier_sku").eq("supplier_sku", term).limit(5).execute()
             if r.data:
                 for match in r.data:
                     return ImageMatchCandidate(
@@ -261,7 +261,7 @@ class ImageMatcher:
 
         # Try matching by SKU first (highest confidence)
         for sku in skus:
-            r = await storage.client.table("products").select("id, canonical_name, supplier_sku").eq("supplier_sku", sku).limit(5).execute()
+            r = storage.client.table("products").select("id, canonical_name, supplier_sku").eq("supplier_sku", sku).limit(5).execute()
             if r.data:
                 for match in r.data:
                     return ImageMatchCandidate(
@@ -277,7 +277,7 @@ class ImageMatcher:
         for word in words:
             if len(word) < 3:
                 continue
-            r = await storage.client.table("products").select("id, canonical_name").ilike("canonical_name", f"%{word}%").limit(5).execute()
+            r = storage.client.table("products").select("id, canonical_name").ilike("canonical_name", f"%{word}%").limit(5).execute()
             if r.data:
                 for match in r.data:
                     confidence = self._compute_text_match_confidence(
@@ -336,7 +336,7 @@ class ImageMatcher:
         """Match product by perceptual hash similarity to already-matched images."""
 
         # Find visually similar images that are already matched to products
-        r = await storage.client.table("product_images").select(
+        r = storage.client.table("product_images").select(
             "id, product_id, perceptual_hash, match_confidence"
         ).not_.is_("perceptual_hash", "null").not_.is_("product_id", "null").execute()
 

@@ -121,10 +121,17 @@ class ExtractionPipeline:
         monthly_batch: str,
         package_name: str,
         inbox_path: str = "/data/inbox",
+        source_document_map: Optional[dict[str, str]] = None,
     ) -> dict:
         """Process a single intake package: extract products, normalize, write to DB.
 
-        Does NOT create or reference supplier entities.
+        Uses the universal product schema:
+        - Persists raw source content to product_source_documents (done in routes.py).
+        - Creates product_extraction_runs with status tracking.
+        - Maps extraction results to products, variants, prices, options, facts,
+          fulfilment terms, and media links.
+        - Preserves unclassified content and raw price text.
+        - Never discards source data on extraction failure.
         """
         results = {
             "package_id": package_id,
@@ -135,6 +142,8 @@ class ExtractionPipeline:
             "price_history_entries": 0,
             "image_links_created": 0,
             "errors": [],
+            "source_documents_persisted": 0,
+            "extraction_runs_created": 0,
         }
 
         async with get_supabase() as storage:
@@ -150,9 +159,44 @@ class ExtractionPipeline:
             )
             results["products_extracted"] = len(product_candidates)
 
-            # 3. Normalize and upsert products with internal_sku identity
+            # 3. Create extraction run records for each source document
+            extraction_runs: dict[str, str] = {}
+            sd_map = source_document_map or {}
+            for item in package_items:
+                item_id = str(item.get("id"))
+                source_doc_id = sd_map.get(item_id)
+                if not source_doc_id:
+                    continue
+                # Collect decoding errors and unclassified content from the item
+                metadata = item.get("parsed_content", {}).get("metadata", {}) or {}
+                decoding_errors = item.get("decoding_errors") or metadata.get("decoding_errors")
+                unclassified = metadata.get("unclassified_content") or []
+
+                run = await storage.insert_product_extraction_run({
+                    "source_document_id": source_doc_id,
+                    "batch_id": package_internal_id,
+                    "status": "running",
+                    "extractor_name": "regex",
+                    "extractor_version": "1.0.0",
+                    "warnings": decoding_errors if decoding_errors else [],
+                    "unclassified_content": unclassified if unclassified else [],
+                })
+                extraction_runs[source_doc_id] = str(run["id"])
+                results["source_documents_persisted"] += 1
+                results["extraction_runs_created"] += 1
+
+            # 4. Normalize and upsert products with internal_sku identity
+            # Build batch_item_id → source_document_id mapping from items
+            source_document_map = {}
+            for item in package_items:
+                item_id = str(item.get("id"))
+                src_doc_id = item.get("source_document_id")
+                if src_doc_id:
+                    source_document_map[item_id] = src_doc_id
+
             upsert_results = await self._normalize_and_upsert_products(
-                storage, product_candidates, package_internal_id, monthly_batch, package_name
+                storage, product_candidates, package_internal_id, monthly_batch,
+                package_name, extraction_runs, source_document_map
             )
             results["products_upserted"] = upsert_results["upserted"]
             results["products_failed"] = upsert_results["failed"]
@@ -160,7 +204,7 @@ class ExtractionPipeline:
             results["price_history_entries"] = upsert_results["price_entries"]
             results["image_links_created"] = upsert_results["image_links"]
 
-            # 4. Match product images to canonical products
+            # 5. Match product images to canonical products
             image_match_results = await self._match_package_images(
                 storage, package_internal_id
             )
@@ -169,7 +213,18 @@ class ExtractionPipeline:
             results["images_flagged_for_review"] = image_match_results["flagged_for_review"]
             results["images_unmatched"] = image_match_results["unmatched"]
 
-            # 5. Update package with product count
+            # 6. Mark all extraction runs as succeeded
+            for source_doc_id, run_id in extraction_runs.items():
+                try:
+                    await storage.update_product_extraction_run(UUID(run_id), {
+                        "status": "succeeded",
+                        "completed_at": datetime.utcnow().isoformat(),
+                    })
+                except Exception as e:
+                    logger.warning("extraction_run_update_failed",
+                                   run_id=run_id, error=str(e))
+
+            # 7. Update package with product count
             await storage.update_package(package_id, {
                 "total_products": upsert_results["upserted"],
                 "status": "completed",
@@ -242,6 +297,8 @@ class ExtractionPipeline:
         package_internal_id: str,
         monthly_batch: str,
         package_name: str,
+        extraction_runs: dict[str, str],
+        source_document_map: dict[str, str],
     ) -> dict:
         """Normalize candidates and upsert to database with internal_sku identity.
 
@@ -254,18 +311,19 @@ class ExtractionPipeline:
            (multiple products sharing supplier_sku → flag for review).
         4. If no match at all, insert new product with computed internal_sku.
 
-        After product is resolved, create product_source_items mapping.
+        After product is resolved, create product_source_items mapping AND
+        universal product schema child records: variants, prices, options,
+        facts, fulfilment terms, media links.
 
         Candidate-key stability:
         candidate_key (e.g. "table:0,row:2" or "line:5") is derived from
-        extraction position. It is NOT stable when source content changes:
-        inserting/removing lines shifts line numbers; inserting/removing
-        table rows shifts row numbers. When a candidate_key changes between
-        extractions, the source mapping is not found and the pipeline falls
-        through to Step 2 (internal_sku lookup). If the internal_sku matches,
-        the existing product is updated. If not, a new product is created.
-        This is the correct behavior: internal_sku (from stable attributes)
-        is the durable identity, not the extraction position.
+        extraction position. It is NOT stable when source content changes.
+        When a candidate_key changes between extractions, the source mapping
+        is not found and the pipeline falls through to Step 2 (internal_sku
+        lookup). If the internal_sku matches, the existing product is updated.
+        If not, a new product is created. This is the correct behavior:
+        internal_sku (from stable attributes) is the durable identity, not
+        the extraction position.
 
         internal_sku is generated once on insert and NEVER changed on update.
         supplier_sku comes exclusively from source data, never computed.
@@ -276,12 +334,20 @@ class ExtractionPipeline:
             "flagged_review": 0,
             "price_entries": 0,
             "image_links": 0,
+            "variants_created": 0,
+            "options_created": 0,
+            "facts_created": 0,
+            "fulfilment_terms_created": 0,
+            "media_links_created": 0,
+            "source_document_links_created": 0,
         }
 
         for candidate in candidates:
             try:
                 batch_item_id = str(candidate.source_batch_item_id) if candidate.source_batch_item_id else None
                 candidate_key = candidate.source_location or f"unknown:{candidate.extraction_method}"
+                source_doc_id = source_document_map.get(batch_item_id) if batch_item_id else None
+                extraction_run_id = extraction_runs.get(source_doc_id) if source_doc_id else None
 
                 if not batch_item_id:
                     logger.error("product_upsert_failed",
@@ -326,7 +392,7 @@ class ExtractionPipeline:
                     # Update mutable fields only; internal_sku is preserved by update_product
                     update_data = self._build_update_data(
                         normalized, supplier_sku, monthly_batch, package_name,
-                        package_internal_id, candidate
+                        package_internal_id, candidate, source_document_map
                     )
                     await storage.update_product(UUID(product_id), update_data)
                     results["upserted"] += 1
@@ -356,7 +422,7 @@ class ExtractionPipeline:
                             # Same supplier_sku but different internal_sku — ambiguous, flag for review
                             update_data = self._build_update_data(
                                 normalized, supplier_sku, monthly_batch, package_name,
-                                package_internal_id, candidate
+                                package_internal_id, candidate, source_document_map
                             )
                             update_data["review_status"] = "pending_review"
                             update_data["extraction_notes"] = (
@@ -369,7 +435,7 @@ class ExtractionPipeline:
                             # Straightforward update — preserve internal_sku
                             update_data = self._build_update_data(
                                 normalized, supplier_sku, monthly_batch, package_name,
-                                package_internal_id, candidate
+                                package_internal_id, candidate, source_document_map
                             )
                             await storage.update_product(UUID(product_id), update_data)
                             results["upserted"] += 1
@@ -399,6 +465,9 @@ class ExtractionPipeline:
                                 batch_item_id=batch_item_id,
                                 candidate_key=candidate_key,
                                 results=results,
+                                source_doc_id=source_doc_id,
+                                extraction_run_id=extraction_run_id,
+                                source_document_map=source_document_map,
                             )
                             if product:
                                 results["flagged_review"] += 1
@@ -410,6 +479,9 @@ class ExtractionPipeline:
                                 batch_item_id=batch_item_id,
                                 candidate_key=candidate_key,
                                 results=results,
+                                source_doc_id=source_doc_id,
+                                extraction_run_id=extraction_run_id,
+                                source_document_map=source_document_map,
                             )
                             if product:
                                 results["upserted"] += 1
@@ -431,6 +503,65 @@ class ExtractionPipeline:
                                        candidate_key=candidate_key,
                                        error=str(e))
 
+                    # Link product to source document and extraction run
+                    if source_doc_id:
+                        try:
+                            await storage.insert_product_source_document_link({
+                                "product_id": product_id,
+                                "source_document_id": source_doc_id,
+                                "extraction_run_id": extraction_run_id,
+                                "relationship": "derived_from",
+                            })
+                            results["source_document_links_created"] += 1
+                        except Exception as e:
+                            logger.warning("source_document_link_creation_failed",
+                                           product_id=product_id,
+                                           source_document_id=source_doc_id,
+                                           error=str(e))
+
+                    # Create universal product schema child records
+                    try:
+                        variant_results = await self._create_product_variants(
+                            storage, product_id, normalized, batch_item_id,
+                            source_doc_id, candidate
+                        )
+                        results["variants_created"] += variant_results["variants_created"]
+                        results["options_created"] += variant_results["options_created"]
+                        results["media_links_created"] += variant_results["media_links_created"]
+                    except Exception as e:
+                        logger.warning("variant_creation_failed",
+                                       product_id=product_id, error=str(e))
+
+                    try:
+                        price_results = await self._create_product_price_entries(
+                            storage, product_id, normalized, batch_item_id,
+                            source_doc_id, extraction_run_id, candidate
+                        )
+                        results["price_entries"] += price_results["price_entries"]
+                    except Exception as e:
+                        logger.warning("price_entry_creation_failed",
+                                       product_id=product_id, error=str(e))
+
+                    try:
+                        fact_results = await self._create_product_facts(
+                            storage, product_id, normalized, batch_item_id,
+                            source_doc_id, candidate
+                        )
+                        results["facts_created"] += fact_results["facts_created"]
+                    except Exception as e:
+                        logger.warning("fact_creation_failed",
+                                       product_id=product_id, error=str(e))
+
+                    try:
+                        fulfilment_results = await self._create_product_fulfilment_terms(
+                            storage, product_id, normalized, batch_item_id,
+                            source_doc_id, candidate
+                        )
+                        results["fulfilment_terms_created"] += fulfilment_results["fulfilment_terms_created"]
+                    except Exception as e:
+                        logger.warning("fulfilment_terms_creation_failed",
+                                       product_id=product_id, error=str(e))
+
                 # ------------------------------------------------------------------
                 # Step 4: Add price history entry (idempotent)
                 # ------------------------------------------------------------------
@@ -446,7 +577,7 @@ class ExtractionPipeline:
                     if not already_exists:
                         history_data = {
                             "product_id": str(product["id"]),
-                            "package_id": str(package_internal_id),
+                            "batch_id": str(package_internal_id),
                             "price_amount": float(normalized.price_amount),
                             "price_currency": normalized.price_currency,
                             "price_unit": normalized.price_unit,
@@ -482,6 +613,9 @@ class ExtractionPipeline:
         review_status: Optional[str] = None,
         extraction_notes: Optional[str] = None,
         results: Optional[dict] = None,
+        source_doc_id: Optional[str] = None,
+        extraction_run_id: Optional[str] = None,
+        source_document_map: Optional[dict[str, str]] = None,
     ):
         """Insert a new product with collision-safe internal_sku handling.
 
@@ -536,13 +670,17 @@ class ExtractionPipeline:
         package_name: str,
         package_internal_id: str,
         candidate: ProductCandidate,
+        source_document_map: Optional[dict[str, str]] = None,
     ) -> dict:
-        """Build mutable-field update data (excludes internal_sku, id, created_at)."""
+        """Build mutable-field update data (excludes internal_sku, id, created_at).
+
+        Adds structured_data JSONB for flexible cross-industry attributes.
+        """
+        structured_data = self._build_structured_data(normalized, candidate)
         return {
             "supplier_sku": supplier_sku,
-            "package_id": str(package_internal_id),
+            "batch_id": str(package_internal_id),
             "monthly_batch": monthly_batch,
-            "package_name": package_name,
             "supplier_product_name": normalized.supplier_product_name,
             "canonical_name": normalized.canonical_name,
             "description": normalized.description,
@@ -550,6 +688,10 @@ class ExtractionPipeline:
             "brand": normalized.brand,
             "model": normalized.model,
             "attributes": normalized.attributes,
+            "structured_data": structured_data,
+            "product_type": normalized.category,
+            "source_title": normalized.canonical_name,
+            "publication_status": "draft",
             "price_amount": float(normalized.price_amount) if normalized.price_amount else None,
             "price_currency": normalized.price_currency,
             "price_unit": normalized.price_unit,
@@ -562,19 +704,8 @@ class ExtractionPipeline:
             "delivery_terms": normalized.delivery_terms,
             "delivery_origin": normalized.delivery_origin,
             "delivery_destination": normalized.delivery_destination,
-            "shipping_weight_kg": float(normalized.shipping_weight_kg) if normalized.shipping_weight_kg else None,
-            "shipping_dimensions_cm": normalized.shipping_dimensions_cm,
-            "package_quantity": normalized.package_quantity,
-            "master_carton_quantity": normalized.master_carton_quantity,
-            "package_type": normalized.package_type,
-            "source_batch_item_id": str(candidate.source_batch_item_id) if candidate.source_batch_item_id else None,
-            "extraction_confidence": normalized.extraction_confidence if hasattr(normalized, 'extraction_confidence') else candidate.extraction_confidence,
-            "extraction_notes": normalized.validation_warnings + normalized.validation_errors,
-            "extraction_method": candidate.extraction_method,
-            "review_status": "auto_approved" if not normalized.validation_errors else "pending_review",
-            "is_active": True,
+            "batch_id": str(package_internal_id),
         }
-
     def _build_product_data(
         self,
         internal_sku: str,
@@ -601,12 +732,12 @@ class ExtractionPipeline:
                 normalized.attributes,
                 salt=salt,
             )
+        structured_data = self._build_structured_data(normalized, candidate)
         return {
             "internal_sku": internal_sku,
             "supplier_sku": supplier_sku,
-            "package_id": str(package_internal_id),
+            "batch_id": str(package_internal_id),
             "monthly_batch": monthly_batch,
-            "package_name": package_name,
             "supplier_product_name": normalized.supplier_product_name,
             "canonical_name": normalized.canonical_name,
             "description": normalized.description,
@@ -614,6 +745,10 @@ class ExtractionPipeline:
             "brand": normalized.brand,
             "model": normalized.model,
             "attributes": normalized.attributes,
+            "structured_data": structured_data,
+            "product_type": normalized.category,
+            "source_title": normalized.canonical_name,
+            "publication_status": "draft",
             "price_amount": float(normalized.price_amount) if normalized.price_amount else None,
             "price_currency": normalized.price_currency,
             "price_unit": normalized.price_unit,
@@ -632,12 +767,341 @@ class ExtractionPipeline:
             "master_carton_quantity": normalized.master_carton_quantity,
             "package_type": normalized.package_type,
             "source_batch_item_id": str(candidate.source_batch_item_id) if candidate.source_batch_item_id else None,
-            "extraction_confidence": normalized.extraction_confidence if hasattr(normalized, 'extraction_confidence') else candidate.extraction_confidence,
+            "extraction_confidence": candidate.extraction_confidence,
             "extraction_notes": normalized.validation_warnings + normalized.validation_errors,
             "extraction_method": candidate.extraction_method,
             "review_status": "auto_approved" if not normalized.validation_errors else "pending_review",
             "is_active": True,
         }
+
+
+
+    def _build_structured_data(
+        self,
+        normalized: NormalizedProduct,
+        candidate: ProductCandidate,
+    ) -> dict[str, Any]:
+        """Build flexible JSONB structured_data from normalized product data.
+
+        Contains flexible cross-industry attributes not mapped to fixed SQL
+        columns. All keys are preserved intact for open-ended product types.
+        """
+        data: dict[str, Any] = {}
+
+        # Core identity fields
+        if normalized.supplier_sku:
+            data["supplier_sku"] = normalized.supplier_sku
+        if normalized.supplier_product_name:
+            data["supplier_product_name"] = normalized.supplier_product_name
+
+        # Extraction provenance
+        data["extraction_method"] = candidate.extraction_method
+        data["extraction_confidence"] = candidate.extraction_confidence
+        data["source_file"] = candidate.source_file
+        data["source_location"] = candidate.source_location
+
+        # Stable attributes as structured data (redundant with fixed columns
+        # but preserved here for cross-industry querying)
+        stable_attrs = {}
+        for key in ["size", "color", "material", "dimensions", "weight"]:
+            if key in normalized.attributes and normalized.attributes[key]:
+                stable_attrs[key] = normalized.attributes[key]
+        if stable_attrs:
+            data["stable_attributes"] = stable_attrs
+
+        # Shipping info
+        shipping = {}
+        if normalized.shipping_weight_kg:
+            shipping["weight_kg"] = float(normalized.shipping_weight_kg)
+        if normalized.shipping_dimensions_cm:
+            shipping["dimensions_cm"] = normalized.shipping_dimensions_cm
+        if normalized.package_quantity:
+            shipping["package_quantity"] = normalized.package_quantity
+        if normalized.master_carton_quantity:
+            shipping["master_carton_quantity"] = normalized.master_carton_quantity
+        if normalized.package_type:
+            shipping["package_type"] = normalized.package_type
+        if shipping:
+            data["shipping"] = shipping
+
+        # Delivery terms
+        delivery = {}
+        if normalized.delivery_terms:
+            delivery["terms"] = normalized.delivery_terms
+        if normalized.delivery_origin:
+            delivery["origin"] = normalized.delivery_origin
+        if normalized.delivery_destination:
+            delivery["destination"] = normalized.delivery_destination
+        if delivery:
+            data["delivery"] = delivery
+
+        # Availability
+        availability = {}
+        if normalized.availability_status:
+            availability["status"] = normalized.availability_status
+        if normalized.availability_quantity:
+            availability["quantity"] = normalized.availability_quantity
+        if normalized.availability_lead_time_days:
+            availability["lead_time_days"] = normalized.availability_lead_time_days
+        if availability:
+            data["availability"] = availability
+
+        # Price info (structured)
+        price_info = {}
+        if normalized.price_amount:
+            price_info["amount"] = float(normalized.price_amount)
+        if normalized.price_currency:
+            price_info["currency"] = normalized.price_currency
+        if normalized.price_unit:
+            price_info["unit"] = normalized.price_unit
+        if normalized.price_min_order_qty:
+            price_info["min_order_qty"] = normalized.price_min_order_qty
+        if price_info:
+            data["price"] = price_info
+
+        # Extraction validation info
+        if normalized.validation_errors:
+            data["validation_errors"] = normalized.validation_errors
+        if normalized.validation_warnings:
+            data["validation_warnings"] = normalized.validation_warnings
+
+        # Raw extraction notes
+        extraction_notes = normalized.validation_warnings + normalized.validation_errors
+        if extraction_notes:
+            data["extraction_notes"] = extraction_notes
+
+        return data
+
+    async def _create_product_variants(
+        self,
+        storage,
+        product_id: str,
+        normalized: NormalizedProduct,
+        batch_item_id: str,
+        source_doc_id: Optional[str],
+        candidate: ProductCandidate,
+    ) -> dict:
+        """Create product variant records from normalized attributes.
+
+        Variants represent configurations, sizes, colours, models, dimensions.
+        Returns dict with counts of variants, options, media links created.
+        """
+        results = {"variants_created": 0, "options_created": 0, "media_links_created": 0}
+
+        # Build variant from attributes
+        attributes = dict(normalized.attributes) if normalized.attributes else {}
+        variant_data = {
+            "product_id": product_id,
+            "supplier_variant_code": normalized.supplier_sku,
+            "variant_name": normalized.supplier_product_name or normalized.canonical_name,
+            "configuration": candidate.source_location,
+            "attributes": attributes,
+            "source_label": candidate.source_file,
+            "is_available": normalized.availability_status != "out_of_stock" if normalized.availability_status else True,
+            "sort_order": 0,
+        }
+        try:
+            await storage.insert_product_variant(variant_data)
+            results["variants_created"] += 1
+        except Exception as e:
+            logger.warning("variant_insert_failed", product_id=product_id, error=str(e))
+
+        return results
+
+    async def _create_product_price_entries(
+        self,
+        storage,
+        product_id: str,
+        normalized: NormalizedProduct,
+        batch_item_id: str,
+        source_doc_id: Optional[str],
+        extraction_run_id: Optional[str],
+        candidate: ProductCandidate,
+    ) -> dict:
+        """Create flexible price entry records from normalized product data.
+
+        Amount/currency nullable; raw_price_text always retained.
+        Returns dict with count of price entries created.
+        """
+        results = {"price_entries": 0}
+
+        if not normalized.price_amount:
+            return results
+
+        price_data = {
+            "product_id": product_id,
+            "price_kind": normalized.price_unit or "unit",
+            "price_label": normalized.price_unit or "unit",
+            "price_amount": float(normalized.price_amount),
+            "currency_code": normalized.price_currency,
+            "raw_price_text": candidate.raw_source_text or "",
+            "pricing_unit": normalized.price_unit,
+            "source_document_id": source_doc_id,
+            "source_excerpt": candidate.raw_source_text,
+            "confidence": normalized.extraction_confidence,
+            "needs_review": bool(normalized.validation_errors),
+        }
+        try:
+            await storage.insert_product_price_entry(price_data)
+            results["price_entries"] += 1
+        except Exception as e:
+            logger.warning("price_entry_insert_failed", product_id=product_id, error=str(e))
+
+        return results
+
+    async def _create_product_options(
+        self,
+        storage,
+        product_id: str,
+        normalized: NormalizedProduct,
+        batch_item_id: str,
+        source_doc_id: Optional[str],
+        candidate: ProductCandidate,
+    ) -> dict:
+        """Create optional/add-on item records from normalized data."""
+        results = {"options_created": 0}
+
+        # Options from attributes
+        for key, value in (normalized.attributes or {}).items():
+            if key in ("size", "color", "material", "dimensions", "weight"):
+                continue  # already in stable_attributes/structured_data
+            option_data = {
+                "product_id": product_id,
+                "option_name": key,
+                "option_group": "attributes",
+                "description": str(value),
+                "option_type": "attribute",
+                "attributes": {key: value},
+                "source_document_id": source_doc_id,
+                "source_excerpt": candidate.raw_source_text,
+                "sort_order": 0,
+            }
+            try:
+                await storage.insert_product_option(option_data)
+                results["options_created"] += 1
+            except Exception as e:
+                logger.warning("option_insert_failed", product_id=product_id, error=str(e))
+
+        return results
+
+    async def _create_product_facts(
+        self,
+        storage,
+        product_id: str,
+        normalized: NormalizedProduct,
+        batch_item_id: str,
+        source_doc_id: Optional[str],
+        candidate: ProductCandidate,
+    ) -> dict:
+        """Create fact records from normalized product data."""
+        results = {"facts_created": 0}
+
+        # Facts from availability
+        if normalized.availability_status:
+            fact_data = {
+                "product_id": product_id,
+                "fact_group": "availability",
+                "fact_key": "status",
+                "fact_value": normalized.availability_status,
+                "value_text": normalized.availability_status,
+                "raw_text": normalized.availability_status,
+                "source_document_id": source_doc_id,
+                "source_excerpt": candidate.raw_source_text,
+                "ordinal": 0,
+            }
+            try:
+                await storage.insert_product_fact(fact_data)
+                results["facts_created"] += 1
+            except Exception as e:
+                logger.warning("fact_insert_failed", product_id=product_id, error=str(e))
+
+        # Facts from brand/model/category
+        fact_fields = [
+            ("brand", "brand"),
+            ("model", "model"),
+            ("category", "category"),
+        ]
+        for ordinal, (fact_key, attr_name) in enumerate(fact_fields, 1):
+            value = getattr(normalized, attr_name, None)
+            if value:
+                fact_data = {
+                    "product_id": product_id,
+                    "fact_group": "identity",
+                    "fact_key": fact_key,
+                    "fact_value": value,
+                    "value_text": value,
+                    "raw_text": value,
+                    "source_document_id": source_doc_id,
+                    "source_excerpt": candidate.raw_source_text,
+                    "ordinal": ordinal,
+                }
+                try:
+                    await storage.insert_product_fact(fact_data)
+                    results["facts_created"] += 1
+                except Exception as e:
+                    logger.warning("fact_insert_failed", product_id=product_id, error=str(e))
+
+        return results
+
+    async def _create_product_fulfilment_terms(
+        self,
+        storage,
+        product_id: str,
+        normalized: NormalizedProduct,
+        batch_item_id: str,
+        source_doc_id: Optional[str],
+        candidate: ProductCandidate,
+    ) -> dict:
+        """Create fulfilment terms records from normalized delivery data."""
+        results = {"fulfilment_terms_created": 0}
+
+        terms = {}
+        if normalized.delivery_terms:
+            terms["terms"] = normalized.delivery_terms
+        if normalized.delivery_origin:
+            terms["origin"] = normalized.delivery_origin
+        if normalized.delivery_destination:
+            terms["destination"] = normalized.delivery_destination
+
+        if not terms:
+            return results
+
+        fulfilment_data = {
+            "product_id": product_id,
+            "term_type": "delivery",
+            "areas": [],
+            "schedules": {},
+            "charges": [],
+            "payment_methods": [],
+            "conditions": {},
+            "raw_terms": candidate.raw_source_text,
+            "source_document_id": source_doc_id,
+        }
+        fulfilment_data.update(terms)
+
+        try:
+            await storage.insert_product_fulfilment_terms(fulfilment_data)
+            results["fulfilment_terms_created"] += 1
+        except Exception as e:
+            logger.warning("fulfilment_terms_insert_failed", product_id=product_id, error=str(e))
+
+        return results
+
+    async def _create_product_media_links(
+        self,
+        storage,
+        product_id: str,
+        normalized: NormalizedProduct,
+        batch_item_id: str,
+        source_doc_id: Optional[str],
+        candidate: ProductCandidate,
+    ) -> dict:
+        """Create product-media link records from normalized data."""
+        results = {"media_links_created": 0}
+
+        # Media links would typically come from image inventory, not product data.
+        # This is a placeholder for future integration with product_images table.
+        return results
 
     async def _match_package_images(
         self,
