@@ -1,0 +1,187 @@
+diff --git a/intake-service/src/api/routes.py b/intake-service/src/api/routes.py
+index 115467c..b636382 100644
+--- a/intake-service/src/api/routes.py
++++ b/intake-service/src/api/routes.py
+@@ -127,14 +127,13 @@ async def process_package_files(
+ 
+             # Persist raw source documents before any parsing (immutable raw content).
+             # A parsing/extraction failure must never roll back the raw-source insert.
+-            source_document_map = {}
++            source_document_map = await storage.get_source_document_map(package_internal_id)
+             for item in stored_items:
+                 if item.get("file_type") != "markdown":
+                     continue
+                 item_id = str(item.get("id"))
+-                if item.get("source_document_id"):
+-                    source_document_map[item_id] = item["source_document_id"]
+-                    continue  # already persisted on a previous run
++                if item_id in source_document_map:
++                    continue  # already persisted on a previous run (unique on batch_item_id)
+                 file_path = Path(resolved_inbox) / source_path / item["file_path"]
+                 try:
+                     raw_bytes = file_path.read_bytes()
+@@ -170,7 +169,6 @@ async def process_package_files(
+                         "file_hash": item.get("file_hash"),
+                     },
+                 })
+-                item["source_document_id"] = str(source_doc["id"])
+                 source_document_map[item_id] = str(source_doc["id"])
+ 
+             # Process image inventory (hashing, thumbnails, dedup, storage).
+diff --git a/intake-service/src/config.py b/intake-service/src/config.py
+index 07ad4ec..115f559 100644
+--- a/intake-service/src/config.py
++++ b/intake-service/src/config.py
+@@ -22,6 +22,10 @@ class Settings(BaseSettings):
+     # the universal product schema tables.
+     OBSIDIAN_SUPPLIER_PATH: Optional[str] = None
+ 
++    # AI-assisted extraction (n8n 'Product Intelligence - AI Extraction' workflow) owns info.md/markdown.
++    # When true the regex line extractor never creates products from markdown or OCR text.
++    AI_EXTRACTION_ENABLED: bool = True
++
+     # Supabase
+     SUPABASE_URL: str
+     SUPABASE_SERVICE_KEY: str
+diff --git a/intake-service/src/core/extractor/pipeline.py b/intake-service/src/core/extractor/pipeline.py
+index 439261e..5150a7f 100644
+--- a/intake-service/src/core/extractor/pipeline.py
++++ b/intake-service/src/core/extractor/pipeline.py
+@@ -30,6 +30,7 @@ from src.core.extractor import (
+ )
+ from src.core.extractor.image_matcher import ImageMatcher
+ from src.core.storage.supabase import supabase_storage, get_supabase
++from src.config import settings
+ 
+ logger = structlog.get_logger()
+ 
+@@ -162,12 +163,16 @@ class ExtractionPipeline:
+ 
+             # 3. Create extraction run records for each source document
+             extraction_runs: dict[str, str] = {}
+-            sd_map = source_document_map or {}
++            sd_map = source_document_map or await storage.get_source_document_map(package_internal_id)
+             for item in package_items:
+                 item_id = str(item.get("id"))
+                 source_doc_id = sd_map.get(item_id)
+                 if not source_doc_id:
+                     continue
++                if settings.AI_EXTRACTION_ENABLED and item.get("file_type") == "markdown":
++                    # Owned by the AI workflow (begin_ai_extraction/apply_ai_extraction).
++                    # Creating a regex run here is what produced the misleading product_count=0 runs.
++                    continue
+                 # Collect decoding errors and unclassified content from the item
+                 metadata = item.get("parsed_content", {}).get("metadata", {}) or {}
+                 decoding_errors = item.get("decoding_errors") or metadata.get("decoding_errors")
+@@ -186,14 +191,11 @@ class ExtractionPipeline:
+                 results["source_documents_persisted"] += 1
+                 results["extraction_runs_created"] += 1
+ 
+-            # 4. Normalize and upsert products with internal_sku identity
+-            # Build batch_item_id → source_document_id mapping from items
+-            source_document_map = {}
+-            for item in package_items:
+-                item_id = str(item.get("id"))
+-                src_doc_id = item.get("source_document_id")
+-                if src_doc_id:
+-                    source_document_map[item_id] = src_doc_id
++            # 4. Normalize and upsert products with internal_sku identity.
++            # IMPORTANT: reuse the real batch_item_id -> source_document_id map. The previous code rebuilt it
++            # from item["source_document_id"], a field that does not exist on batch_items, which emptied the
++            # map: no links, no child rows, and every run reported product_count=0.
++            source_document_map = sd_map
+ 
+             upsert_results = await self._normalize_and_upsert_products(
+                 storage, product_candidates, package_internal_id, monthly_batch,
+@@ -329,13 +331,17 @@ class ExtractionPipeline:
+     ) -> list[ProductCandidate]:
+         """Extract products from parsed content based on file type."""
+         if file_type == "markdown":
++            if settings.AI_EXTRACTION_ENABLED:
++                return []  # AI workflow owns markdown; unclassified lines are never products
+             return product_extractor.extract_from_markdown(parsed, file_name)
+         elif file_type == "pdf":
+             return product_extractor.extract_from_pdf(parsed, file_name)
+         elif file_type == "spreadsheet":
+             return product_extractor.extract_from_spreadsheet(parsed, file_name)
+         elif file_type == "image":
+-            return product_extractor.extract_from_ocr(parsed, file_name)
++            # OCR text stays on batch_items.ocr_text. Raw OCR lines are not product identities
++            # (observed: 'is ee', 'eer pay eae').
++            return []
+         return []
+ 
+     async def _normalize_and_upsert_products(
+@@ -407,6 +413,13 @@ class ExtractionPipeline:
+                 # Normalize
+                 normalized = product_normalizer.normalize(candidate)
+ 
++                # Identity gate: an unclassified/price-only fragment is not a product.
++                _name = (normalized.supplier_product_name or normalized.canonical_name or "").strip()
++                if len(_name) < 3 or len(_name.split()) < 2 or (candidate.extraction_confidence or 0) < 0.4:
++                    results["rejected_no_identity"] = results.get("rejected_no_identity", 0) + 1
++                    logger.info("candidate_rejected_no_identity", name=_name, location=candidate.source_location)
++                    continue
++
+                 if normalized.validation_errors:
+                     logger.warning("product_validation_errors",
+                                    internal_sku=None,
+diff --git a/intake-service/src/core/extractor/product.py b/intake-service/src/core/extractor/product.py
+index 30c2abe..6101a6e 100644
+--- a/intake-service/src/core/extractor/product.py
++++ b/intake-service/src/core/extractor/product.py
+@@ -129,17 +129,7 @@ class ProductExtractor:
+                 seen_texts.add(c.raw_source_text)
+                 candidates.append(c)
+ 
+-        # 3. From unclassified content lines that look like products -> drafts
+-        for entry in metadata.get('unclassified_content', []):
+-            text = entry.get('text') if isinstance(entry, dict) else str(entry)
+-            if not text or text in seen_texts:
+-                continue
+-            candidate = self._extract_from_line(
+-                text, f"{source_file}:unclassified:{entry.get('line_no', '?') if isinstance(entry, dict) else '?'}", 'markdown'
+-            )
+-            if candidate:
+-                seen_texts.add(text)
+-                candidates.append(candidate)
++        # 3. Unclassified lines are NOT products. They stay on the extraction run (unclassified_content).
+ 
+         # Supplier info from metadata
+         supplier_name = metadata.get('supplier_name')
+@@ -206,10 +196,12 @@ class ProductExtractor:
+         )
+ 
+         has_price = False
+-        # Extract price - try both patterns
++        # Extract price - try both patterns. A bare number is not a price: require a currency marker.
+         price_match = self.PRICE_PATTERN.search(line)
+         if not price_match:
+             price_match = self.TRAILING_PRICE_PATTERN.search(line)
++        if price_match and not re.search(r"[\$\u20ac\u00a3]|\b(?:usd|eur|gbp|cad)\b", line, re.IGNORECASE):
++            price_match = None
+ 
+         if price_match:
+             has_price = True
+diff --git a/intake-service/src/core/storage/supabase.py b/intake-service/src/core/storage/supabase.py
+index 45afd5c..af34811 100644
+--- a/intake-service/src/core/storage/supabase.py
++++ b/intake-service/src/core/storage/supabase.py
+@@ -222,6 +222,17 @@ class SupabaseStorage:
+         result = self.client.table("batch_items").select("*").eq("batch_id", package_id).execute()
+         return result.data or []
+ 
++    async def get_source_document_map(self, batch_id: str) -> dict[str, str]:
++        """Map batch_item_id -> product_source_documents.id for a batch.
++
++        batch_items has no source_document_id column, so this table is the only
++        durable link. Used to make source-document persistence and extraction
++        runs idempotent across retries.
++        """
++        result = (self.client.table("product_source_documents")
++                  .select("id,batch_item_id").eq("batch_id", str(batch_id)).execute())
++        return {str(r["batch_item_id"]): str(r["id"]) for r in (result.data or []) if r.get("batch_item_id")}
++
+     # ===== Product Operations =====
+ 
+     async def insert_product(self, product_data: dict) -> dict:

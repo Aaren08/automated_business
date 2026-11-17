@@ -30,6 +30,7 @@ from src.core.extractor import (
 )
 from src.core.extractor.image_matcher import ImageMatcher
 from src.core.storage.supabase import supabase_storage, get_supabase
+from src.config import settings
 
 logger = structlog.get_logger()
 
@@ -162,11 +163,15 @@ class ExtractionPipeline:
 
             # 3. Create extraction run records for each source document
             extraction_runs: dict[str, str] = {}
-            sd_map = source_document_map or {}
+            sd_map = source_document_map or await storage.get_source_document_map(package_internal_id)
             for item in package_items:
                 item_id = str(item.get("id"))
                 source_doc_id = sd_map.get(item_id)
                 if not source_doc_id:
+                    continue
+                if settings.AI_EXTRACTION_ENABLED and item.get("file_type") == "markdown":
+                    # Owned by the AI workflow (begin_ai_extraction/apply_ai_extraction).
+                    # Creating a regex run here is what produced the misleading product_count=0 runs.
                     continue
                 # Collect decoding errors and unclassified content from the item
                 metadata = item.get("parsed_content", {}).get("metadata", {}) or {}
@@ -186,14 +191,11 @@ class ExtractionPipeline:
                 results["source_documents_persisted"] += 1
                 results["extraction_runs_created"] += 1
 
-            # 4. Normalize and upsert products with internal_sku identity
-            # Build batch_item_id → source_document_id mapping from items
-            source_document_map = {}
-            for item in package_items:
-                item_id = str(item.get("id"))
-                src_doc_id = item.get("source_document_id")
-                if src_doc_id:
-                    source_document_map[item_id] = src_doc_id
+            # 4. Normalize and upsert products with internal_sku identity.
+            # IMPORTANT: reuse the real batch_item_id -> source_document_id map. The previous code rebuilt it
+            # from item["source_document_id"], a field that does not exist on batch_items, which emptied the
+            # map: no links, no child rows, and every run reported product_count=0.
+            source_document_map = sd_map
 
             upsert_results = await self._normalize_and_upsert_products(
                 storage, product_candidates, package_internal_id, monthly_batch,
@@ -329,13 +331,17 @@ class ExtractionPipeline:
     ) -> list[ProductCandidate]:
         """Extract products from parsed content based on file type."""
         if file_type == "markdown":
+            if settings.AI_EXTRACTION_ENABLED:
+                return []  # AI workflow owns markdown; unclassified lines are never products
             return product_extractor.extract_from_markdown(parsed, file_name)
         elif file_type == "pdf":
             return product_extractor.extract_from_pdf(parsed, file_name)
         elif file_type == "spreadsheet":
             return product_extractor.extract_from_spreadsheet(parsed, file_name)
         elif file_type == "image":
-            return product_extractor.extract_from_ocr(parsed, file_name)
+            # OCR text stays on batch_items.ocr_text. Raw OCR lines are not product identities
+            # (observed: 'is ee', 'eer pay eae').
+            return []
         return []
 
     async def _normalize_and_upsert_products(
@@ -406,6 +412,13 @@ class ExtractionPipeline:
 
                 # Normalize
                 normalized = product_normalizer.normalize(candidate)
+
+                # Identity gate: an unclassified/price-only fragment is not a product.
+                _name = (normalized.supplier_product_name or normalized.canonical_name or "").strip()
+                if len(_name) < 3 or len(_name.split()) < 2 or (candidate.extraction_confidence or 0) < 0.4:
+                    results["rejected_no_identity"] = results.get("rejected_no_identity", 0) + 1
+                    logger.info("candidate_rejected_no_identity", name=_name, location=candidate.source_location)
+                    continue
 
                 if normalized.validation_errors:
                     logger.warning("product_validation_errors",

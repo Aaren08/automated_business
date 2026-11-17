@@ -222,6 +222,17 @@ class SupabaseStorage:
         result = self.client.table("batch_items").select("*").eq("batch_id", package_id).execute()
         return result.data or []
 
+    async def get_source_document_map(self, batch_id: str) -> dict[str, str]:
+        """Map batch_item_id -> product_source_documents.id for a batch.
+
+        batch_items has no source_document_id column, so this table is the only
+        durable link. Used to make source-document persistence and extraction
+        runs idempotent across retries.
+        """
+        result = (self.client.table("product_source_documents")
+                  .select("id,batch_item_id").eq("batch_id", str(batch_id)).execute())
+        return {str(r["batch_item_id"]): str(r["id"]) for r in (result.data or []) if r.get("batch_item_id")}
+
     # ===== Product Operations =====
 
     async def insert_product(self, product_data: dict) -> dict:

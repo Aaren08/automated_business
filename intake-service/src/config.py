@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     # the universal product schema tables.
     OBSIDIAN_SUPPLIER_PATH: Optional[str] = None
 
+    # AI-assisted extraction (n8n 'Product Intelligence - AI Extraction' workflow) owns info.md/markdown.
+    # When true the regex line extractor never creates products from markdown or OCR text.
+    AI_EXTRACTION_ENABLED: bool = True
+
     # Supabase
     SUPABASE_URL: str
     SUPABASE_SERVICE_KEY: str

@@ -127,14 +127,13 @@ async def process_package_files(
 
             # Persist raw source documents before any parsing (immutable raw content).
             # A parsing/extraction failure must never roll back the raw-source insert.
-            source_document_map = {}
+            source_document_map = await storage.get_source_document_map(package_internal_id)
             for item in stored_items:
                 if item.get("file_type") != "markdown":
                     continue
                 item_id = str(item.get("id"))
-                if item.get("source_document_id"):
-                    source_document_map[item_id] = item["source_document_id"]
-                    continue  # already persisted on a previous run
+                if item_id in source_document_map:
+                    continue  # already persisted on a previous run (unique on batch_item_id)
                 file_path = Path(resolved_inbox) / source_path / item["file_path"]
                 try:
                     raw_bytes = file_path.read_bytes()
@@ -170,7 +169,6 @@ async def process_package_files(
                         "file_hash": item.get("file_hash"),
                     },
                 })
-                item["source_document_id"] = str(source_doc["id"])
                 source_document_map[item_id] = str(source_doc["id"])
 
             # Process image inventory (hashing, thumbnails, dedup, storage).

@@ -129,17 +129,7 @@ class ProductExtractor:
                 seen_texts.add(c.raw_source_text)
                 candidates.append(c)
 
-        # 3. From unclassified content lines that look like products -> drafts
-        for entry in metadata.get('unclassified_content', []):
-            text = entry.get('text') if isinstance(entry, dict) else str(entry)
-            if not text or text in seen_texts:
-                continue
-            candidate = self._extract_from_line(
-                text, f"{source_file}:unclassified:{entry.get('line_no', '?') if isinstance(entry, dict) else '?'}", 'markdown'
-            )
-            if candidate:
-                seen_texts.add(text)
-                candidates.append(candidate)
+        # 3. Unclassified lines are NOT products. They stay on the extraction run (unclassified_content).
 
         # Supplier info from metadata
         supplier_name = metadata.get('supplier_name')
@@ -206,10 +196,12 @@ class ProductExtractor:
         )
 
         has_price = False
-        # Extract price - try both patterns
+        # Extract price - try both patterns. A bare number is not a price: require a currency marker.
         price_match = self.PRICE_PATTERN.search(line)
         if not price_match:
             price_match = self.TRAILING_PRICE_PATTERN.search(line)
+        if price_match and not re.search(r"[\$\u20ac\u00a3]|\b(?:usd|eur|gbp|cad)\b", line, re.IGNORECASE):
+            price_match = None
 
         if price_match:
             has_price = True
