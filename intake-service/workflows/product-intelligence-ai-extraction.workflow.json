@@ -1,595 +1,674 @@
 {
-  "name": "Product Intelligence - AI Extraction",
-  "nodes": [
-    {
-      "parameters": {
-        "content": "## Product Intelligence - AI Extraction\nReads `pending_ai_extractions`, extracts with OpenRouter (forced tool call), writes through `apply_ai_extraction` (validated, idempotent, one transaction per document). Failures go to `fail_ai_extraction`; source documents are never modified.\n**Credentials:** `Nexora Supabase` (supabaseApi, service role) and `OpenRouter API Key` (Header Auth: name `x-api-key`).\nRun SQL migration 001 first.",
-        "height": 216,
-        "width": 460
-      },
-      "type": "n8n-nodes-base.stickyNote",
-      "typeVersion": 1,
-      "position": [
-        0,
-        0
-      ],
-      "name": "Notes",
-      "id": "bce0ed86-5e06-4312-bc6b-0805d5070616"
-    },
-    {
-      "parameters": {
-        "rule": {
-          "interval": [
-            {
-              "field": "minutes",
-              "minutesInterval": 10
-            }
-          ]
-        }
-      },
-      "type": "n8n-nodes-base.scheduleTrigger",
-      "typeVersion": 1.2,
-      "position": [
-        128,
-        272
-      ],
-      "name": "Every 10 minutes",
-      "id": "17bfb751-cb63-4371-8a94-ed1db9e8c3a5"
-    },
-    {
-      "parameters": {},
-      "type": "n8n-nodes-base.manualTrigger",
-      "typeVersion": 1,
-      "position": [
-        128,
-        432
-      ],
-      "name": "Manual Run",
-      "id": "d7649a6d-a456-4264-821b-07a31cf3d404"
-    },
-    {
-      "parameters": {
-        "assignments": {
-          "assignments": [
-            {
-              "id": "a1",
-              "name": "supabase_url",
-              "value": "https://vfworiwvplpwppwqqkrx.supabase.co",
-              "type": "string"
-            },
-            {
-              "id": "a2",
-              "name": "model",
-              "value": "Nemotron 3 Ultra (free)",
-              "type": "string"
-            },
-            {
-              "id": "a3",
-              "name": "prompt_version",
-              "value": "v2",
-              "type": "string"
-            },
-            {
-              "id": "a4",
-              "name": "max_tokens",
-              "value": 32000,
-              "type": "number"
-            },
-            {
-              "id": "a5",
-              "name": "max_docs",
-              "value": 5,
-              "type": "number"
-            },
-            {
-              "id": "a6",
-              "name": "min_confidence",
-              "value": 0.6,
-              "type": "number"
-            },
-            {
-              "id": "a7",
-              "name": "auto_approve",
-              "value": 0.85,
-              "type": "number"
-            }
-          ]
-        },
-        "options": {}
-      },
-      "type": "n8n-nodes-base.set",
-      "typeVersion": 3.4,
-      "position": [
-        368,
-        352
-      ],
-      "name": "Config",
-      "id": "97b4d434-f9fd-4c3f-8442-64fa320bcf84"
-    },
-    {
-      "parameters": {
-        "url": "={{ $json.supabase_url }}/rest/v1/pending_ai_extractions?select=source_document_id,source_filename,chars&limit={{ $json.max_docs }}",
-        "authentication": "predefinedCredentialType",
-        "nodeCredentialType": "supabaseApi",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        592,
-        352
-      ],
-      "name": "List Pending Documents",
-      "id": "50ffc439-270a-41bc-bd28-536f46e00c6b",
-      "credentials": {
-        "supabaseApi": {
-          "id": "JnUsutNEUWMmHfDk",
-          "name": "Supabase account"
-        }
+ "name": "Product Intelligence - AI Extraction",
+ "nodes": [
+  {
+   "parameters": {
+    "content": "## Product Intelligence - AI Extraction (v3: chunked)\nDocument is split into sections (separator lines, headings; delivery lists kept apart), each part is extracted separately, results are merged, then `apply_ai_extraction` validates and writes. Failed parts are recorded (run becomes `partial` and is retried up to 3 times). Requires SQL 003. Bump `prompt_version` in Config to re-extract all documents.",
+    "height": 216,
+    "width": 460
+   },
+   "type": "n8n-nodes-base.stickyNote",
+   "typeVersion": 1,
+   "position": [
+    0,
+    0
+   ],
+   "name": "Notes",
+   "id": "bce0ed86-5e06-4312-bc6b-0805d5070616"
+  },
+  {
+   "parameters": {
+    "rule": {
+     "interval": [
+      {
+       "field": "minutes",
+       "minutesInterval": 10
       }
-    },
-    {
-      "parameters": {
-        "options": {}
-      },
-      "type": "n8n-nodes-base.splitInBatches",
-      "typeVersion": 3,
-      "position": [
-        800,
-        352
-      ],
-      "name": "Loop Documents",
-      "id": "3c87b8b8-1d60-4205-bad5-fe2a01afaa29"
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $('Config').first().json.supabase_url }}/rest/v1/rpc/begin_ai_extraction",
-        "authentication": "predefinedCredentialType",
-        "nodeCredentialType": "supabaseApi",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ p_source_document_id: $json.source_document_id, p_model: $('Config').first().json.model, p_prompt_version: $('Config').first().json.prompt_version }) }}",
-        "options": {
-          "timeout": 120000
-        }
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        1024,
-        352
-      ],
-      "name": "Begin Run",
-      "id": "cfb31700-de6b-4fe7-9fba-fcdaa525f8a7",
-      "credentials": {
-        "supabaseApi": {
-          "id": "JnUsutNEUWMmHfDk",
-          "name": "Supabase account"
-        }
-      }
-    },
-    {
-      "parameters": {
-        "conditions": {
-          "options": {
-            "caseSensitive": true,
-            "leftValue": "",
-            "typeValidation": "strict",
-            "version": 1
-          },
-          "conditions": [
-            {
-              "id": "c1",
-              "leftValue": "={{ $json.already_done }}",
-              "rightValue": "",
-              "operator": {
-                "type": "boolean",
-                "operation": "true",
-                "singleValue": true
-              }
-            }
-          ],
-          "combinator": "and"
-        },
-        "options": {}
-      },
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2.2,
-      "position": [
-        1248,
-        352
-      ],
-      "name": "Already Done?",
-      "id": "deec25cf-e789-43a8-ac9c-939cebd7e029"
-    },
-    {
-      "parameters": {},
-      "type": "n8n-nodes-base.noOp",
-      "typeVersion": 1,
-      "position": [
-        1472,
-        224
-      ],
-      "name": "Skip (already done)",
-      "id": "bb5874dd-d242-417c-af08-a4936d2abf72"
-    },
-    {
-      "parameters": {
-        "url": "={{ $('Config').first().json.supabase_url }}/rest/v1/product_source_documents?id=eq.{{ $('Begin Run').item.json.source_document_id }}&select=id,source_filename,raw_content",
-        "authentication": "predefinedCredentialType",
-        "nodeCredentialType": "supabaseApi",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        1472,
-        400
-      ],
-      "name": "Fetch Source",
-      "id": "aa178a16-bcc2-457a-8997-fe94abbc1a64",
-      "credentials": {
-        "supabaseApi": {
-          "id": "JnUsutNEUWMmHfDk",
-          "name": "Supabase account"
-        }
-      },
-      "onError": "continueErrorOutput"
-    },
-    {
-      "parameters": {
-        "mode": "runOnceForEachItem",
-        "jsCode": "const cfg = $('Config').first().json;\nconst run = $('Begin Run').item.json;\nconst doc = $json;\n\nif (!doc.raw_content || !doc.raw_content.trim()) throw new Error('source document is empty');\n\nconst systemPrompt = \"You extract structured product data from a supplier's information document (info.md). Documents are messy: plain text, emoji bullets, typos, mixed Markdown, price lists and delivery lists.\\nRULES\\n1. A product is something a customer can buy, identified by a title, a heading, or a price-list heading. Section headers (Price, Sizes, Colours, Fabric, Delivery, Notes), option lists, surcharges, sizes and delivery areas are NEVER products.\\n2. Every product needs source_excerpt: a short passage (<=120 chars) copied VERBATIM from the document that proves the product exists. Never invent products, names, prices or areas.\\n3. If the document has no product title, use a clearly provisional descriptive name, confidence <= 0.5 and needs_review true.\\n4. Keep every price as its own entry with raw_text copied verbatim. Use variants for sizes/styles/configurations, put frame/set/fitting splits in components. Currency from the symbol (£=GBP). If a price is ambiguous set needs_review true and a low confidence.\\n5. Optional extras / add-ons go in options (is_included=false). Dimensions, materials and other specifications go in specifications or facts.\\n6. Delivery areas, schedules, charges and payment terms apply to the whole document: put them in fulfilment_terms (areas as {name, postcode?}). Do not invent payment terms; if absent, say so in warnings.\\n7. Anything you cannot classify confidently goes into unclassified_content with a reason. Never drop information and never turn it into a product.\\n8. Respond ONLY by calling the record_extraction tool.\";\n\nconst request = {\n  model: \"nvidia/nemotron-3-ultra-550b-a55b:free\",\n  max_tokens: cfg.max_tokens || 4096,\n  messages: [\n    { role: \"system\", content: systemPrompt },\n    { role: \"user\", content: 'File: ' + (doc.source_filename || 'info.md') + '\\n\\n<document>\\n' + doc.raw_content + '\\n</document>' }\n  ],\n  tools: [{\n    type: \"function\",\n    function: {\n      name: 'record_extraction',\n      description: 'Record the structured extraction of this document.',\n      parameters: {\"type\": \"object\", \"required\": [\"products\"], \"properties\": {\"products\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"required\": [\"name\", \"source_excerpt\", \"confidence\"], \"properties\": {\"name\": {\"type\": \"string\"}, \"description\": {\"type\": \"string\"}, \"category\": {\"type\": \"string\"}, \"confidence\": {\"type\": \"number\"}, \"needs_review\": {\"type\": \"boolean\"}, \"notes\": {\"type\": \"string\"}, \"source_excerpt\": {\"type\": \"string\"}, \"specifications\": {\"type\": \"object\"}, \"variants\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"required\": [\"name\"], \"properties\": {\"name\": {\"type\": \"string\"}, \"configuration\": {\"type\": \"string\"}, \"attributes\": {\"type\": \"object\"}, \"source_label\": {\"type\": \"string\"}, \"sort_order\": {\"type\": \"integer\"}}}}, \"prices\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"required\": [\"raw_text\"], \"properties\": {\"kind\": {\"type\": \"string\"}, \"label\": {\"type\": \"string\"}, \"variant\": {\"type\": \"string\"}, \"amount\": {\"type\": [\"number\", \"null\"]}, \"currency\": {\"type\": \"string\"}, \"unit\": {\"type\": \"string\"}, \"applies_to\": {\"type\": \"string\"}, \"components\": {\"type\": \"object\"}, \"conditions\": {\"type\": \"object\"}, \"raw_text\": {\"type\": \"string\"}, \"confidence\": {\"type\": \"number\"}, \"needs_review\": {\"type\": \"boolean\"}}}}, \"options\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"required\": [\"name\"], \"properties\": {\"name\": {\"type\": \"string\"}, \"group\": {\"type\": \"string\"}, \"type\": {\"type\": \"string\"}, \"description\": {\"type\": \"string\"}, \"is_included\": {\"type\": \"boolean\"}, \"attributes\": {\"type\": \"object\"}, \"source_excerpt\": {\"type\": \"string\"}}}}, \"facts\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"required\": [\"key\"], \"properties\": {\"group\": {\"type\": \"string\"}, \"key\": {\"type\": \"string\"}, \"value\": {\"type\": \"string\"}, \"unit\": {\"type\": \"string\"}, \"raw_text\": {\"type\": \"string\"}}}}}}}, \"fulfilment_terms\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {\"term_type\": {\"type\": \"string\", \"enum\": [\"delivery\", \"payment\", \"charges\", \"returns\", \"other\"]}, \"label\": {\"type\": \"string\"}, \"areas\": {\"type\": \"array\", \"items\": {\"type\": \"object\"}}, \"schedules\": {\"type\": \"object\"}, \"charges\": {\"type\": \"array\", \"items\": {\"type\": \"object\"}}, \"payment_methods\": {\"type\": \"array\", \"items\": {\"type\": \"object\"}}, \"conditions\": {\"type\": \"object\"}, \"raw_terms\": {\"type\": \"string\"}}}}, \"unclassified_content\": {\"type\": \"array\", \"items\": {\"type\": \"object\", \"properties\": {\"type\": {\"type\": \"string\"}, \"text\": {\"type\": \"string\"}, \"reason\": {\"type\": \"string\"}}}}, \"warnings\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"overall_confidence\": {\"type\": \"number\"}}}\n    }\n  }],\n  tool_choice: { type: 'function', function: { name: 'record_extraction' } }\n};\n\nreturn { json: { request, run_id: run.run_id, source_document_id: doc.id } };"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        1680,
-        400
-      ],
-      "name": "Build LLM Request",
-      "id": "c6c2ba56-cf08-4b9a-888b-1ee17b978c6c",
-      "onError": "continueErrorOutput"
-    },
-    {
-      "parameters": {
-        "mode": "runOnceForEachItem",
-        "jsCode": "const resp = $json;\nconst run = $('Begin Run').item.json;\n\n// Check if the response was truncated by max tokens\nif (resp.choices && resp.choices[0] && resp.choices[0].finish_reason === 'length') {\n  throw new Error('LLM output truncated (max_tokens); raise max_tokens or chunk the document');\n}\n\n// Extract the message content from OpenAI/OpenRouter format\nconst message = resp.choices && resp.choices[0] && resp.choices[0].message;\nif (!message) throw new Error('LLM returned no message choices');\n\nlet p;\ntry {\n  // If the model responded with tool calls (OpenAI style)\n  if (message.tool_calls && message.tool_calls.length > 0) {\n    const toolCall = message.tool_calls.find(tc => tc.function && tc.function.name === 'record_extraction');\n    if (!toolCall) throw new Error('LLM returned no record_extraction tool call');\n    p = JSON.parse(toolCall.function.arguments);\n  } else if (message.content) {\n    // Fallback: parse JSON directly if the model outputted it as plain text content\n    let rawText = message.content.trim();\n    if (rawText.startsWith('```json')) {\n      rawText = rawText.replace(/^```json/, '').replace(/```$/, '').trim();\n    } else if (rawText.startsWith('```')) {\n      rawText = rawText.replace(/^```/, '').replace(/```$/, '').trim();\n    }\n    p = JSON.parse(rawText);\n  } else {\n    throw new Error('LLM response content is empty');\n  }\n} catch (e) {\n  throw new Error('Failed to parse LLM structured output: ' + e.message);\n}\n\nif (!p || !Array.isArray(p.products)) throw new Error('payload.products is not an array');\n\nconst num = v => { \n  if (typeof v === 'number') return Number.isFinite(v) ? v : null; \n  if (typeof v === 'string') { const n = parseFloat(v.replace(/[^0-9.\\-]/g, '')); return Number.isFinite(n) ? n : null; } \n  return null; \n};\n\nconst clamp = v => { \n  const n = num(v); \n  return n === null ? 0 : Math.min(1, Math.max(0, n)); \n};\n\np.products = p.products.filter(x => x && typeof x.name === 'string').map(x => {\n  x.confidence = clamp(x.confidence);\n  x.prices = (x.prices || []).map(pr => { \n    const a = num(pr.amount); \n    return { ...pr, amount: a, needs_review: !!pr.needs_review || a === null, confidence: pr.confidence === undefined ? undefined : clamp(pr.confidence) }; \n  });\n  return x;\n});\n\np.overall_confidence = clamp(p.overall_confidence);\np.warnings = [...(p.warnings || []), 'model=' + (resp.model || 'unknown') + ' usage=' + JSON.stringify(resp.usage || {})];\n\nreturn { json: { run_id: run.run_id, payload: p } };"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        2128,
-        400
-      ],
-      "name": "Parse & Pre-validate",
-      "id": "0c2a97fc-6412-408f-9b3c-27abd88ace55",
-      "onError": "continueErrorOutput"
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $('Config').first().json.supabase_url }}/rest/v1/rpc/apply_ai_extraction",
-        "authentication": "predefinedCredentialType",
-        "nodeCredentialType": "supabaseApi",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ p_run_id: $json.run_id, p_payload: $json.payload, p_min_confidence: $('Config').first().json.min_confidence, p_auto_approve: $('Config').first().json.auto_approve }) }}",
-        "options": {
-          "timeout": 120000
-        }
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        2352,
-        400
-      ],
-      "name": "Apply Extraction",
-      "id": "ee6d730e-97e8-41fe-8115-1d3a85bc5540",
-      "credentials": {
-        "supabaseApi": {
-          "id": "JnUsutNEUWMmHfDk",
-          "name": "Supabase account"
-        }
-      },
-      "onError": "continueErrorOutput"
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $('Config').first().json.supabase_url }}/rest/v1/rpc/fail_ai_extraction",
-        "authentication": "predefinedCredentialType",
-        "nodeCredentialType": "supabaseApi",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ p_run_id: $('Begin Run').item.json.run_id, p_error: String($json.error?.message || $json.message || JSON.stringify($json)).slice(0, 2000) }) }}",
-        "options": {
-          "timeout": 120000
-        }
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        1904,
-        608
-      ],
-      "name": "Record Failure",
-      "id": "27f90e9a-507d-401a-a145-76ee86feaa5b",
-      "credentials": {
-        "supabaseApi": {
-          "id": "JnUsutNEUWMmHfDk",
-          "name": "Supabase account"
-        }
-      }
-    },
-    {
-      "parameters": {
-        "jsCode": "const out = { applied: 0, failed: 0, skipped_already_done: 0, by_status: {} };\nconst safe = n => { try { return $(n).all(); } catch (e) { return []; } };\nfor (const i of safe('Apply Extraction')) { out.applied++; const s = i.json.status || 'unknown'; out.by_status[s] = (out.by_status[s] || 0) + 1; }\nout.failed = safe('Record Failure').length;\nout.skipped_already_done = safe('Skip (already done)').length;\nreturn [{ json: out }];"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        1024,
-        144
-      ],
-      "name": "Run Summary",
-      "id": "fd9b5e0d-728c-4ad0-b3b6-4f959453c6ac"
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "https://openrouter.ai/api/v1/chat/completions",
-        "authentication": "predefinedCredentialType",
-        "nodeCredentialType": "openRouterApi",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": []
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify($json.request) }}",
-        "options": {
-          "timeout": 600000
-        }
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        1904,
-        400
-      ],
-      "name": "Call OpenRouter",
-      "retryOnFail": true,
-      "maxTries": 3,
-      "waitBetweenTries": 5000,
-      "id": "0a599b4a-6f1d-4280-aa93-81bc875399bc",
-      "credentials": {
-        "openRouterApi": {
-          "id": "z7hDksBO1uwSLSur",
-          "name": "OpenRouter account"
-        }
-      },
-      "onError": "continueErrorOutput"
+     ]
     }
-  ],
-  "pinData": {},
-  "connections": {
-    "Every 10 minutes": {
-      "main": [
-        [
-          {
-            "node": "Config",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
+   },
+   "type": "n8n-nodes-base.scheduleTrigger",
+   "typeVersion": 1.2,
+   "position": [
+    128,
+    272
+   ],
+   "name": "Every 10 minutes",
+   "id": "17bfb751-cb63-4371-8a94-ed1db9e8c3a5"
+  },
+  {
+   "parameters": {},
+   "type": "n8n-nodes-base.manualTrigger",
+   "typeVersion": 1,
+   "position": [
+    128,
+    432
+   ],
+   "name": "Manual Run",
+   "id": "d7649a6d-a456-4264-821b-07a31cf3d404"
+  },
+  {
+   "parameters": {
+    "assignments": {
+     "assignments": [
+      {
+       "id": "a1",
+       "name": "supabase_url",
+       "value": "https://vfworiwvplpwppwqqkrx.supabase.co",
+       "type": "string"
+      },
+      {
+       "id": "a2",
+       "name": "model",
+       "value": "Nemotron 3 Ultra (free)",
+       "type": "string"
+      },
+      {
+       "id": "a3",
+       "name": "prompt_version",
+       "value": "v3",
+       "type": "string"
+      },
+      {
+       "id": "a4",
+       "name": "max_tokens",
+       "value": 8000,
+       "type": "number"
+      },
+      {
+       "id": "a5",
+       "name": "max_docs",
+       "value": 5,
+       "type": "number"
+      },
+      {
+       "id": "a6",
+       "name": "min_confidence",
+       "value": 0.6,
+       "type": "number"
+      },
+      {
+       "id": "a7",
+       "name": "auto_approve",
+       "value": 0.85,
+       "type": "number"
+      },
+      {
+       "id": "n_model_id",
+       "name": "model_id",
+       "value": "nvidia/nemotron-3-ultra-550b-a55b:free",
+       "type": "string"
+      },
+      {
+       "id": "n_chunk_max_chars",
+       "name": "chunk_max_chars",
+       "value": 1800,
+       "type": "number"
+      },
+      {
+       "id": "n_request_interval_ms",
+       "name": "request_interval_ms",
+       "value": 3000,
+       "type": "number"
+      }
+     ]
     },
-    "Manual Run": {
-      "main": [
-        [
-          {
-            "node": "Config",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Config": {
-      "main": [
-        [
-          {
-            "node": "List Pending Documents",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "List Pending Documents": {
-      "main": [
-        [
-          {
-            "node": "Loop Documents",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Loop Documents": {
-      "main": [
-        [
-          {
-            "node": "Run Summary",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Begin Run",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Begin Run": {
-      "main": [
-        [
-          {
-            "node": "Already Done?",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Already Done?": {
-      "main": [
-        [
-          {
-            "node": "Skip (already done)",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Fetch Source",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Skip (already done)": {
-      "main": [
-        [
-          {
-            "node": "Loop Documents",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Fetch Source": {
-      "main": [
-        [
-          {
-            "node": "Build LLM Request",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Record Failure",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Build LLM Request": {
-      "main": [
-        [
-          {
-            "node": "Call OpenRouter",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Record Failure",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Parse & Pre-validate": {
-      "main": [
-        [
-          {
-            "node": "Apply Extraction",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Record Failure",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Apply Extraction": {
-      "main": [
-        [
-          {
-            "node": "Loop Documents",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Record Failure",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Record Failure": {
-      "main": [
-        [
-          {
-            "node": "Loop Documents",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Call OpenRouter": {
-      "main": [
-        [
-          {
-            "node": "Parse & Pre-validate",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Record Failure",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
+    "options": {}
+   },
+   "type": "n8n-nodes-base.set",
+   "typeVersion": 3.4,
+   "position": [
+    368,
+    352
+   ],
+   "name": "Config",
+   "id": "97b4d434-f9fd-4c3f-8442-64fa320bcf84"
+  },
+  {
+   "parameters": {
+    "url": "={{ $json.supabase_url }}/rest/v1/rpc/list_pending_ai_extractions",
+    "authentication": "predefinedCredentialType",
+    "nodeCredentialType": "supabaseApi",
+    "options": {},
+    "method": "POST",
+    "sendBody": true,
+    "specifyBody": "json",
+    "jsonBody": "={{ JSON.stringify({ p_prompt_version: $json.prompt_version, p_limit: $json.max_docs }) }}"
+   },
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.2,
+   "position": [
+    592,
+    352
+   ],
+   "name": "List Pending Documents",
+   "id": "50ffc439-270a-41bc-bd28-536f46e00c6b",
+   "credentials": {
+    "supabaseApi": {
+     "id": "JnUsutNEUWMmHfDk",
+     "name": "Supabase account"
     }
+   }
   },
-  "active": false,
-  "settings": {
-    "executionOrder": "v1",
-    "binaryMode": "separate"
+  {
+   "parameters": {
+    "options": {}
+   },
+   "type": "n8n-nodes-base.splitInBatches",
+   "typeVersion": 3,
+   "position": [
+    800,
+    352
+   ],
+   "name": "Loop Documents",
+   "id": "3c87b8b8-1d60-4205-bad5-fe2a01afaa29"
   },
-  "versionId": "de5f167a-ed06-4511-8892-3614fbfb03f0",
-  "meta": {
-    "instanceId": "e28c5083a85382637d57566fff6dc11ea849958e3d8f723d97ce73a28d2c03e8"
+  {
+   "parameters": {
+    "method": "POST",
+    "url": "={{ $('Config').first().json.supabase_url }}/rest/v1/rpc/begin_ai_extraction",
+    "authentication": "predefinedCredentialType",
+    "nodeCredentialType": "supabaseApi",
+    "sendBody": true,
+    "specifyBody": "json",
+    "jsonBody": "={{ JSON.stringify({ p_source_document_id: $json.source_document_id, p_model: $('Config').first().json.model, p_prompt_version: $('Config').first().json.prompt_version }) }}",
+    "options": {
+     "timeout": 120000
+    }
+   },
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.2,
+   "position": [
+    1024,
+    352
+   ],
+   "name": "Begin Run",
+   "id": "cfb31700-de6b-4fe7-9fba-fcdaa525f8a7",
+   "credentials": {
+    "supabaseApi": {
+     "id": "JnUsutNEUWMmHfDk",
+     "name": "Supabase account"
+    }
+   }
   },
-  "nodeGroups": [],
-  "id": "IwIwdXiYFHTUYKjZ",
-  "tags": []
+  {
+   "parameters": {
+    "conditions": {
+     "options": {
+      "caseSensitive": true,
+      "leftValue": "",
+      "typeValidation": "strict",
+      "version": 1
+     },
+     "conditions": [
+      {
+       "id": "c1",
+       "leftValue": "={{ $json.already_done }}",
+       "rightValue": "",
+       "operator": {
+        "type": "boolean",
+        "operation": "true",
+        "singleValue": true
+       }
+      }
+     ],
+     "combinator": "and"
+    },
+    "options": {}
+   },
+   "type": "n8n-nodes-base.if",
+   "typeVersion": 2.2,
+   "position": [
+    1248,
+    352
+   ],
+   "name": "Already Done?",
+   "id": "deec25cf-e789-43a8-ac9c-939cebd7e029"
+  },
+  {
+   "parameters": {},
+   "type": "n8n-nodes-base.noOp",
+   "typeVersion": 1,
+   "position": [
+    1472,
+    224
+   ],
+   "name": "Skip (already done)",
+   "id": "bb5874dd-d242-417c-af08-a4936d2abf72"
+  },
+  {
+   "parameters": {
+    "url": "={{ $('Config').first().json.supabase_url }}/rest/v1/product_source_documents?id=eq.{{ $('Begin Run').item.json.source_document_id }}&select=id,source_filename,raw_content",
+    "authentication": "predefinedCredentialType",
+    "nodeCredentialType": "supabaseApi",
+    "options": {}
+   },
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.2,
+   "position": [
+    1472,
+    400
+   ],
+   "name": "Fetch Source",
+   "id": "aa178a16-bcc2-457a-8997-fe94abbc1a64",
+   "credentials": {
+    "supabaseApi": {
+     "id": "JnUsutNEUWMmHfDk",
+     "name": "Supabase account"
+    }
+   },
+   "onError": "continueErrorOutput"
+  },
+  {
+   "parameters": {
+    "mode": "runOnceForEachItem",
+    "language": "javaScript",
+    "jsCode": "const cfg = $('Config').first().json;\nconst c = $json;\nconst base = \"You extract structured product data from part of a supplier's information document (info.md). The text is messy: plain text, emoji bullets, typos, price lists, delivery lists.\\nRULES\\n1. A product is something a customer can buy, named by a title, heading or price-list heading. Section headers (Price, Sizes, Colours, Fabric, Delivery, Notes), option lists, surcharges, sizes and delivery areas are NEVER products.\\n2. Each product needs source_excerpt: ONE line (max 80 chars) copied exactly from the text. Never invent products, names, prices or areas.\\n3. identity_source = 'explicit_title' only if the name is written in the text as a title/heading. If you had to describe it yourself use 'inferred', confidence <= 0.5, needs_review true. A finish or colour alone ('Matt finishing') is not a product name.\\n4. Every price line becomes its own prices[] entry: amount as a plain number, currency from the symbol, raw_text = the original line copied exactly. Sizes/styles go in variants and the price's variant field. Frame/set/fitting splits: keep one entry per amount and say which in kind.\\n5. Optional extras go in options (is_included=false). Dimensions and materials go in specifications or facts.\\n6. Delivery areas, schedules, charges and payment terms go in fulfilment_terms. areas MUST be objects like {\\\"name\\\":\\\"Sheffield\\\",\\\"postcode\\\":\\\"S\\\"}; never return empty objects; one area per list line. Do not invent payment terms.\\n7. Anything you cannot classify goes into unclassified_content with a reason. Never drop information.\\n8. Answer ONLY by calling record_extraction.\\n\\nEXAMPLE\\nText: 'Oak Table\\\\nSize: Price:\\\\n4ft  £120\\\\nDelivery: Leeds - LS'\\nOutput: {\\\"products\\\":[{\\\"name\\\":\\\"Oak Table\\\",\\\"identity_source\\\":\\\"explicit_title\\\",\\\"confidence\\\":0.9,\\\"source_excerpt\\\":\\\"Oak Table\\\",\\\"variants\\\":[{\\\"name\\\":\\\"4ft\\\"}],\\\"prices\\\":[{\\\"kind\\\":\\\"size_price\\\",\\\"label\\\":\\\"4ft\\\",\\\"variant\\\":\\\"4ft\\\",\\\"amount\\\":120,\\\"currency\\\":\\\"GBP\\\",\\\"raw_text\\\":\\\"4ft  £120\\\"}]}],\\\"fulfilment_terms\\\":[{\\\"term_type\\\":\\\"delivery\\\",\\\"label\\\":\\\"delivery\\\",\\\"areas\\\":[{\\\"name\\\":\\\"Leeds\\\",\\\"postcode\\\":\\\"LS\\\"}],\\\"raw_terms\\\":\\\"Delivery: Leeds - LS\\\"}],\\\"unclassified_content\\\":[],\\\"warnings\\\":[],\\\"overall_confidence\\\":0.9}\";\nconst part = c.kind === 'delivery'\n  ? \"\\nTHIS PART contains delivery/payment terms. Put them in fulfilment_terms (one term per zone or list, with schedule notes in schedules/conditions). Return products: [] unless a product is clearly defined here.\"\n  : \"\\nTHIS PART contains product information. Extract products with their variants, prices, options and facts. Do not return fulfilment_terms unless delivery/payment text appears in this part.\";\nconst system = base + part + \"\\nThis is part \" + c.chunk_index + \" of \" + c.chunk_count + \" of the same document; extract only what is in this part.\";\nconst user = 'File: ' + c.source_filename + (c.chunk_index > 1 ? '\\nDocument begins: ' + c.context : '') + '\\n\\n<document_part>\\n' + c.text + '\\n</document_part>';\nconst S = {type:'string'}, O = {type:'object'};\nconst schema = {type:'object', required:['products'], properties:{\n  products:{type:'array', items:{type:'object', required:['name','source_excerpt','confidence'], properties:{\n    name:S, identity_source:{type:'string', enum:['explicit_title','inferred']}, description:S, category:S, confidence:{type:'number'}, needs_review:{type:'boolean'}, notes:S, source_excerpt:S, specifications:O,\n    variants:{type:'array', items:{type:'object', required:['name'], properties:{name:S, configuration:S, attributes:O, source_label:S, sort_order:{type:'integer'}}}},\n    prices:{type:'array', items:{type:'object', required:['raw_text'], properties:{kind:S, label:S, variant:S, amount:{type:['number','null']}, currency:S, unit:S, applies_to:S, components:O, conditions:O, raw_text:S, confidence:{type:'number'}, needs_review:{type:'boolean'}}}},\n    options:{type:'array', items:{type:'object', required:['name'], properties:{name:S, group:S, type:S, description:S, is_included:{type:'boolean'}, attributes:O, source_excerpt:S}}},\n    facts:{type:'array', items:{type:'object', required:['key'], properties:{group:S, key:S, value:S, unit:S, raw_text:S}}}}}},\n  fulfilment_terms:{type:'array', items:{type:'object', properties:{term_type:{type:'string', enum:['delivery','payment','charges','returns','other']}, label:S,\n    areas:{type:'array', items:{type:'object', required:['name'], properties:{name:S, postcode:S}}}, schedules:O, charges:{type:'array', items:O}, payment_methods:{type:'array', items:O}, conditions:O, raw_terms:S}}},\n  unclassified_content:{type:'array', items:{type:'object', properties:{type:S, text:S, reason:S}}}, warnings:{type:'array', items:S}, overall_confidence:{type:'number'}}};\nconst request = {\n  model: cfg.model_id || 'nvidia/nemotron-3-ultra-550b-a55b:free',\n  max_tokens: Number(cfg.max_tokens) || 8000,\n  messages: [{ role:'system', content: system }, { role:'user', content: user }],\n  tools: [{ type:'function', function:{ name:'record_extraction', description:'Record the structured extraction of this document part.', parameters: schema } }],\n  tool_choice: { type:'function', function:{ name:'record_extraction' } }\n};\nreturn { json: { request, run_id: c.run_id, source_document_id: c.source_document_id, chunk_index: c.chunk_index, chunk_count: c.chunk_count, kind: c.kind } };\n"
+   },
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    1780,
+    140
+   ],
+   "name": "Build LLM Request",
+   "id": "c6c2ba56-cf08-4b9a-888b-1ee17b978c6c",
+   "onError": "continueErrorOutput"
+  },
+  {
+   "parameters": {
+    "mode": "runOnceForEachItem",
+    "language": "javaScript",
+    "jsCode": "const resp = $json;\nconst c = $('Build LLM Request').item.json;\nconst base = { run_id: c.run_id, chunk_index: c.chunk_index, chunk_count: c.chunk_count, kind: c.kind };\nconst num = v => { if (typeof v === 'number') return Number.isFinite(v) ? v : null; if (typeof v === 'string') { const n = parseFloat(v.replace(/[^0-9.\\-]/g, '')); return Number.isFinite(n) ? n : null; } return null; };\nconst clamp = v => { const n = num(v); return n === null ? 0 : Math.min(1, Math.max(0, n)); };\nconst lenient = s => { try { return JSON.parse(s); } catch (e) { const a = s.indexOf('{'), b = s.lastIndexOf('}'); if (a >= 0 && b > a) return JSON.parse(s.slice(a, b + 1).replace(/,\\s*([}\\]])/g, '$1')); throw e; } };\ntry {\n  if (resp.error) throw new Error('LLM request failed: ' + (resp.error.message || JSON.stringify(resp.error)).slice(0, 300));\n  const choice = resp.choices && resp.choices[0];\n  if (!choice || !choice.message) throw new Error('LLM returned no message');\n  if (choice.finish_reason === 'length') throw new Error('LLM output truncated (max_tokens); lower chunk_max_chars or raise max_tokens');\n  const m = choice.message; let p;\n  const tc = (m.tool_calls || []).find(x => x.function && x.function.name === 'record_extraction');\n  if (tc) p = lenient(tc.function.arguments);\n  else if (m.content) p = lenient(String(m.content).trim());\n  else throw new Error('LLM response is empty');\n  if (!p || typeof p !== 'object') throw new Error('payload is not an object');\n  p.products = (Array.isArray(p.products) ? p.products : []).filter(x => x && typeof x.name === 'string' && x.name.trim()).map(x => {\n    x.confidence = clamp(x.confidence);\n    if (typeof x.source_excerpt === 'string') x.source_excerpt = x.source_excerpt.split('\\n')[0].slice(0, 160);\n    x.prices = (x.prices || []).map(pr => { const a = num(pr.amount); return { ...pr, amount: a, needs_review: !!pr.needs_review || a === null }; });\n    return x;\n  });\n  p.fulfilment_terms = (Array.isArray(p.fulfilment_terms) ? p.fulfilment_terms : []).map(t => ({ ...t,\n    areas: (Array.isArray(t.areas) ? t.areas : []).map(a => typeof a === 'string' ? { name: a.trim() } : a).filter(a => a && ((a.name && String(a.name).trim()) || a.postcode)) }));\n  p.unclassified_content = Array.isArray(p.unclassified_content) ? p.unclassified_content : [];\n  p.warnings = Array.isArray(p.warnings) ? p.warnings : [];\n  p.overall_confidence = clamp(p.overall_confidence);\n  p.warnings.push('chunk ' + c.chunk_index + '/' + c.chunk_count + ' model=' + (resp.model || 'unknown') + ' tokens=' + ((resp.usage && resp.usage.total_tokens) || '?'));\n  return { json: { ...base, ok: true, payload: p } };\n} catch (e) {\n  return { json: { ...base, ok: false, error: String(e.message || e).slice(0, 500) } };\n}\n"
+   },
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    2220,
+    140
+   ],
+   "name": "Parse & Pre-validate",
+   "id": "0c2a97fc-6412-408f-9b3c-27abd88ace55"
+  },
+  {
+   "parameters": {
+    "method": "POST",
+    "url": "={{ $('Config').first().json.supabase_url }}/rest/v1/rpc/apply_ai_extraction",
+    "authentication": "predefinedCredentialType",
+    "nodeCredentialType": "supabaseApi",
+    "sendBody": true,
+    "specifyBody": "json",
+    "jsonBody": "={{ JSON.stringify({ p_run_id: $json.run_id, p_payload: $json.payload, p_min_confidence: $('Config').first().json.min_confidence, p_auto_approve: $('Config').first().json.auto_approve }) }}",
+    "options": {
+     "timeout": 120000
+    }
+   },
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.2,
+   "position": [
+    2880,
+    140
+   ],
+   "name": "Apply Extraction",
+   "id": "ee6d730e-97e8-41fe-8115-1d3a85bc5540",
+   "credentials": {
+    "supabaseApi": {
+     "id": "JnUsutNEUWMmHfDk",
+     "name": "Supabase account"
+    }
+   },
+   "onError": "continueErrorOutput"
+  },
+  {
+   "parameters": {
+    "method": "POST",
+    "url": "={{ $('Config').first().json.supabase_url }}/rest/v1/rpc/fail_ai_extraction",
+    "authentication": "predefinedCredentialType",
+    "nodeCredentialType": "supabaseApi",
+    "sendBody": true,
+    "specifyBody": "json",
+    "jsonBody": "={{ JSON.stringify({ p_run_id: $('Begin Run').last().json.run_id, p_error: String($json.error?.message || $json.message || JSON.stringify($json)).slice(0, 2000) }) }}",
+    "options": {
+     "timeout": 120000
+    }
+   },
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.2,
+   "position": [
+    2220,
+    340
+   ],
+   "name": "Record Failure",
+   "id": "27f90e9a-507d-401a-a145-76ee86feaa5b",
+   "credentials": {
+    "supabaseApi": {
+     "id": "JnUsutNEUWMmHfDk",
+     "name": "Supabase account"
+    }
+   }
+  },
+  {
+   "parameters": {
+    "jsCode": "const out = { applied: 0, failed: 0, skipped_already_done: 0, by_status: {} };\nconst safe = n => { try { return $(n).all(); } catch (e) { return []; } };\nfor (const i of safe('Apply Extraction')) { out.applied++; const s = i.json.status || 'unknown'; out.by_status[s] = (out.by_status[s] || 0) + 1; }\nout.failed = safe('Record Failure').length;\nout.skipped_already_done = safe('Skip (already done)').length;\nreturn [{ json: out }];"
+   },
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    1024,
+    144
+   ],
+   "name": "Run Summary",
+   "id": "fd9b5e0d-728c-4ad0-b3b6-4f959453c6ac"
+  },
+  {
+   "parameters": {
+    "method": "POST",
+    "url": "https://openrouter.ai/api/v1/chat/completions",
+    "authentication": "predefinedCredentialType",
+    "nodeCredentialType": "openRouterApi",
+    "sendHeaders": true,
+    "headerParameters": {
+     "parameters": []
+    },
+    "sendBody": true,
+    "specifyBody": "json",
+    "jsonBody": "={{ JSON.stringify($json.request) }}",
+    "options": {
+     "timeout": 600000,
+     "batching": {
+      "batch": {
+       "batchSize": 1,
+       "batchInterval": "={{ $('Config').first().json.request_interval_ms }}"
+      }
+     }
+    }
+   },
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.2,
+   "position": [
+    2000,
+    140
+   ],
+   "name": "Call OpenRouter",
+   "retryOnFail": true,
+   "maxTries": 3,
+   "waitBetweenTries": 8000,
+   "id": "0a599b4a-6f1d-4280-aa93-81bc875399bc",
+   "credentials": {
+    "openRouterApi": {
+     "id": "z7hDksBO1uwSLSur",
+     "name": "OpenRouter account"
+    }
+   },
+   "onError": "continueRegularOutput"
+  },
+  {
+   "parameters": {
+    "language": "javaScript",
+    "jsCode": "const cfg = $('Config').first().json;\nconst run = $('Begin Run').last().json;\nconst doc = $input.first().json;\nconst MAX = Number(cfg.chunk_max_chars) || 1800;\nconst text = String(doc.raw_content || '').replace(/\\r/g, '');\nif (!text.trim()) throw new Error('source document is empty');\n\nconst plain = l => l.replace(/[*_`#>]/g, '').replace(/[\\u{1F000}-\\u{1FFFF}\\u2600-\\u27BF\\uFE0F\\u200D]/gu, '').trim();\nconst isSep = l => /^\\s*[*_=~\\-]{6,}\\s*$/.test(l);\nconst isAreaLine = l => /^[A-Za-z .'\\/&-]{2,40}\\.?\\s*[-–]\\s*[A-Za-z]{1,3}\\.?(\\s*[-–]\\s*[A-Za-z]{1,3})?\\.?\\s*$/.test(plain(l));\nconst isHeading = l => {\n  const t = plain(l); if (!t || t.length > 60) return false;\n  const letters = t.replace(/[^A-Za-z]/g, '');\n  return /:-?$/.test(t) || (letters.length >= 4 && t === t.toUpperCase()) || /\\bareas?$/i.test(t) || /\\b(routes|sides)\\b/i.test(t) || /^\\d+\\.\\s/.test(t);\n};\nconst kindOf = lines => {\n  const body = lines.filter(l => plain(l));\n  if (!body.length) return 'product';\n  if (/^(delivery|deliveries)\\b/i.test(plain(body[0]))) return 'delivery';\n  return body.filter(isAreaLine).length / body.length >= 0.4 ? 'delivery' : 'product';\n};\n\n// 1. split on separator lines\nlet sections = [], cur = [];\nfor (const l of text.split('\\n')) { if (isSep(l)) { if (cur.length) sections.push(cur); cur = []; } else cur.push(l); }\nif (cur.length) sections.push(cur);\n\n// 2. oversized sections: split at headings, carry tiny heading-only pieces forward, then hard-split by lines\nconst size = ls => ls.join('\\n').length;\nconst splitBig = ls => {\n  if (size(ls) <= MAX) return [ls];\n  let parts = [], c = [];\n  for (const l of ls) { if (isHeading(l) && c.some(x => plain(x))) { parts.push(c); c = []; } c.push(l); }\n  if (c.length) parts.push(c);\n  const merged = []; let carry = [];\n  for (const p of parts) { const q = carry.concat(p); if (size(p) < 150) carry = q; else { merged.push(q); carry = []; } }\n  if (carry.length) { if (merged.length) merged[merged.length - 1] = merged[merged.length - 1].concat(carry); else merged.push(carry); }\n  const out = [];\n  for (const m of merged) { let b = []; for (const l of m) { if (size(b.concat(l)) > MAX && b.length) { out.push(b); b = []; } b.push(l); } if (b.length) out.push(b); }\n  return out;\n};\nlet units = [];\nfor (const s of sections) for (const u of splitBig(s)) if (u.some(x => plain(x))) units.push({ lines: u, kind: kindOf(u) });\n\n// 3. pack neighbours of the same kind up to MAX\nconst chunks = [];\nfor (const u of units) {\n  const last = chunks[chunks.length - 1];\n  if (last && last.kind === u.kind && size(last.lines.concat(u.lines)) + 2 <= MAX) last.lines = last.lines.concat([''], u.lines);\n  else chunks.push({ kind: u.kind, lines: u.lines.slice() });\n}\nconst context = text.split('\\n').map(plain).filter(Boolean).slice(0, 3).join(' | ').slice(0, 200);\nreturn chunks.map((c, i) => ({ json: {\n  run_id: run.run_id, source_document_id: doc.id, source_filename: doc.source_filename || 'info.md',\n  chunk_index: i + 1, chunk_count: chunks.length, kind: c.kind, text: c.lines.join('\\n').trim(), context\n} }));\n"
+   },
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    1560,
+    140
+   ],
+   "name": "Split Document",
+   "onError": "continueErrorOutput"
+  },
+  {
+   "parameters": {
+    "language": "javaScript",
+    "jsCode": "const items = $input.all().map(i => i.json);\nconst runId = items[0] && items[0].run_id ? items[0].run_id : $('Begin Run').last().json.run_id;\nconst ok = items.filter(i => i.ok), bad = items.filter(i => !i.ok);\nif (!ok.length) throw new Error('all ' + items.length + ' chunks failed: ' + bad.map(b => 'part ' + b.chunk_index + ': ' + b.error).join(' | ').slice(0, 1500));\nconst nk = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');\nconst pm = new Map();\nconst addUnique = (arr, add, keyFn) => { const seen = new Set(arr.map(keyFn)); for (const x of add || []) { const k = keyFn(x); if (!seen.has(k)) { seen.add(k); arr.push(x); } } };\nfor (const r of ok.sort((a, b) => a.chunk_index - b.chunk_index)) for (const p of r.payload.products) {\n  const k = nk(p.name); let t = pm.get(k);\n  if (!t) { t = { ...p, variants: [], prices: [], options: [], facts: [] }; pm.set(k, t); }\n  else { t.confidence = Math.min(t.confidence, p.confidence); t.description = t.description || p.description; t.specifications = { ...(p.specifications || {}), ...(t.specifications || {}) }; if (p.identity_source === 'explicit_title') t.identity_source = 'explicit_title'; t.needs_review = !!(t.needs_review && p.needs_review); }\n  addUnique(t.variants, p.variants, v => nk(v.name) + '|' + nk(v.configuration));\n  addUnique(t.prices, p.prices, x => [x.kind, x.label, x.variant, x.applies_to, x.raw_text].map(nk).join('|'));\n  addUnique(t.options, p.options, o => nk(o.group) + '|' + nk(o.name));\n  addUnique(t.facts, p.facts, f => nk(f.group) + '|' + nk(f.key));\n}\nconst tm = new Map();\nfor (const r of ok) for (const t of r.payload.fulfilment_terms) {\n  const k = nk(t.term_type || 'delivery') + '|' + nk(t.label); let m = tm.get(k);\n  if (!m) { m = { ...t, areas: [], charges: [], payment_methods: [] }; tm.set(k, m); }\n  else { m.schedules = { ...(t.schedules || {}), ...(m.schedules || {}) }; m.conditions = { ...(t.conditions || {}), ...(m.conditions || {}) }; m.raw_terms = [m.raw_terms, t.raw_terms].filter(Boolean).join('\\n'); }\n  addUnique(m.areas, t.areas, a => nk(a.name) + '|' + nk(a.postcode));\n  addUnique(m.charges, t.charges, c => JSON.stringify(c));\n  addUnique(m.payment_methods, t.payment_methods, c => JSON.stringify(c));\n}\nconst warnings = ok.flatMap(r => r.payload.warnings).concat(bad.map(b => 'chunk ' + b.chunk_index + '/' + b.chunk_count + ' FAILED: ' + b.error));\nconst conf = ok.map(r => r.payload.overall_confidence);\nconst payload = {\n  products: [...pm.values()], fulfilment_terms: [...tm.values()], unclassified_content: ok.flatMap(r => r.payload.unclassified_content), warnings,\n  overall_confidence: conf.length ? Math.min(...conf) : 0, chunks_total: items.length, chunks_failed: bad.length\n};\nreturn [{ json: { run_id: runId, payload } }];\n"
+   },
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    2660,
+    140
+   ],
+   "name": "Merge Chunks",
+   "onError": "continueErrorOutput"
+  }
+ ],
+ "pinData": {},
+ "connections": {
+  "Every 10 minutes": {
+   "main": [
+    [
+     {
+      "node": "Config",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Manual Run": {
+   "main": [
+    [
+     {
+      "node": "Config",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Config": {
+   "main": [
+    [
+     {
+      "node": "List Pending Documents",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "List Pending Documents": {
+   "main": [
+    [
+     {
+      "node": "Loop Documents",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Loop Documents": {
+   "main": [
+    [
+     {
+      "node": "Run Summary",
+      "type": "main",
+      "index": 0
+     }
+    ],
+    [
+     {
+      "node": "Begin Run",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Begin Run": {
+   "main": [
+    [
+     {
+      "node": "Already Done?",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Already Done?": {
+   "main": [
+    [
+     {
+      "node": "Skip (already done)",
+      "type": "main",
+      "index": 0
+     }
+    ],
+    [
+     {
+      "node": "Fetch Source",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Skip (already done)": {
+   "main": [
+    [
+     {
+      "node": "Loop Documents",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Fetch Source": {
+   "main": [
+    [
+     {
+      "node": "Split Document",
+      "type": "main",
+      "index": 0
+     }
+    ],
+    [
+     {
+      "node": "Record Failure",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Build LLM Request": {
+   "main": [
+    [
+     {
+      "node": "Call OpenRouter",
+      "type": "main",
+      "index": 0
+     }
+    ],
+    [
+     {
+      "node": "Record Failure",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Parse & Pre-validate": {
+   "main": [
+    [
+     {
+      "node": "Merge Chunks",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Apply Extraction": {
+   "main": [
+    [
+     {
+      "node": "Loop Documents",
+      "type": "main",
+      "index": 0
+     }
+    ],
+    [
+     {
+      "node": "Record Failure",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Record Failure": {
+   "main": [
+    [
+     {
+      "node": "Loop Documents",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Call OpenRouter": {
+   "main": [
+    [
+     {
+      "node": "Parse & Pre-validate",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Split Document": {
+   "main": [
+    [
+     {
+      "node": "Build LLM Request",
+      "type": "main",
+      "index": 0
+     }
+    ],
+    [
+     {
+      "node": "Record Failure",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Merge Chunks": {
+   "main": [
+    [
+     {
+      "node": "Apply Extraction",
+      "type": "main",
+      "index": 0
+     }
+    ],
+    [
+     {
+      "node": "Record Failure",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  }
+ },
+ "active": false,
+ "settings": {
+  "executionOrder": "v1",
+  "binaryMode": "separate"
+ },
+ "versionId": "de5f167a-ed06-4511-8892-3614fbfb03f0",
+ "meta": {
+  "instanceId": "e28c5083a85382637d57566fff6dc11ea849958e3d8f723d97ce73a28d2c03e8"
+ },
+ "nodeGroups": [],
+ "id": "IwIwdXiYFHTUYKjZ",
+ "tags": []
 }
