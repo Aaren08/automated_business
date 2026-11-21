@@ -127,7 +127,7 @@ class ImageInventory:
                     contact_sheet_bytes = generate_contact_sheet(contact_sheet_data)
                     if contact_sheet_bytes:
                         cs_result = await storage_client.upload_batch_contact_sheet(
-                            contact_sheet_bytes, batch_id
+                            contact_sheet_bytes, source_path
                         )
                         results["contact_sheet_path"] = cs_result["path"]
                         # Update batch with contact sheet path
@@ -194,12 +194,12 @@ class ImageInventory:
             
             return {"duplicate": True, "asset_id": existing_asset["id"]}
         
-        # New asset - upload to storage
+        # New asset - upload to storage (organized under the package folder)
         upload_result = await storage_client.upload_image_asset(
             image_bytes,
             item["file_name"],
-            file_hash,
-            batch_id,
+            source_path,
+            item["file_path"],
         )
         
         # Create product_images record

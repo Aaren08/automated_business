@@ -57,7 +57,7 @@ class SupabaseStorageClient:
 
         Args:
             file_bytes: File content
-            storage_path: Path in bucket (e.g., "batches/uuid/image.jpg")
+            storage_path: Path in bucket (e.g., "BATCH-2025-11/1/inventory/photo1.jpg")
             content_type: MIME type
             upsert: Whether to overwrite existing
 
@@ -131,18 +131,37 @@ class SupabaseStorageClient:
         self,
         original_bytes: bytes,
         filename: str,
-        file_hash: str,
-        batch_id: str,
+        storage_dir: str,
+        relative_path: str,
     ) -> dict:
-        """Upload original image and thumbnails as an asset."""
+        """Upload original image and thumbnails as an asset.
+
+        Storage layout mirrors the supplier inbox so each numbered package
+        (1, 2, 3, ...) lives in its own folder under its monthly batch and
+        can be deleted independently:
+
+            {storage_dir}/{relative_path}                                    <- original
+            {storage_dir}/thumbs/{relative_path}.thumb_{size}.jpg            <- thumbnails
+
+        Example:
+            BATCH-2025-11/1/inventory/photo1.jpg
+            BATCH-2025-11/1/thumbs/inventory/photo1.jpg.thumb_small.jpg
+
+        Args:
+            original_bytes: File content
+            filename: Original file name (used for extension / MIME type)
+            storage_dir: Package storage folder, e.g. "BATCH-2025-11/1"
+            relative_path: Path of the file within the package, e.g. "inventory/photo1.jpg"
+
+        Returns:
+            Dict with original_path, original_url, thumbnails, size
+        """
         ext = Path(filename).suffix.lower()
         if ext not in {".jpg", ".jpeg", ".png", ".webp", ".tiff", ".tif"}:
             ext = ".jpg"
 
-        asset_dir = f"assets/{file_hash}"
-
         # Upload original (idempotent: skipped if already stored)
-        original_path = f"{asset_dir}/original{ext}"
+        original_path = f"{storage_dir}/{relative_path}"
         original_result = await self._upload_if_not_exists(
             original_bytes, original_path,
             content_type=self._get_mime_type(ext),
@@ -153,7 +172,7 @@ class SupabaseStorageClient:
         thumb_results = {}
 
         for size_name, thumb_bytes in thumbs.items():
-            thumb_path = f"{asset_dir}/thumb_{size_name}.jpg"
+            thumb_path = f"{storage_dir}/thumbs/{relative_path}.thumb_{size_name}.jpg"
             thumb_result = await self._upload_if_not_exists(
                 thumb_bytes, thumb_path, "image/jpeg"
             )
@@ -165,14 +184,18 @@ class SupabaseStorageClient:
             "thumbnails": thumb_results,
             "size": original_result["size"],
         }
-    
+
     async def upload_batch_contact_sheet(
         self,
         contact_sheet_bytes: bytes,
-        batch_id: str,
+        storage_dir: str,
     ) -> dict:
-        """Upload contact sheet for a batch."""
-        path = f"contact_sheets/{batch_id}/contact_sheet.jpg"
+        """Upload contact sheet for a batch/package.
+
+        Stored at {storage_dir}/contact_sheet.jpg, e.g.
+        BATCH-2025-11/1/contact_sheet.jpg
+        """
+        path = f"{storage_dir}/contact_sheet.jpg"
         return await self.upload_file(
             contact_sheet_bytes, path, "image/jpeg"
         )

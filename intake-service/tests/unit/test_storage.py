@@ -98,22 +98,22 @@ async def test_upload_image_asset_success(client_and_bucket):
         result = await storage_client.upload_image_asset(
             original_bytes=b"fake-image-bytes",
             filename="photo.jpg",
-            file_hash="abc123def456",
-            batch_id="batch-001",
+            storage_dir="BATCH-2025-11/1",
+            relative_path="inventory/photo.jpg",
         )
 
     # One upload for original + one per thumbnail
     assert bucket.upload_call_count == 1 + len(FAKE_THUMBS), bucket.upload_call_count
 
     # Schema column is `original_path` (NOT `object_storage_key`)
-    assert result["original_path"] == "assets/abc123def456/original.jpg"
+    assert result["original_path"] == "BATCH-2025-11/1/inventory/photo.jpg"
     assert result["original_url"].endswith(
-        "/product-intelligence/assets/abc123def456/original.jpg"
+        "/product-intelligence/BATCH-2025-11/1/inventory/photo.jpg"
     )
     assert result["thumbnails"] == {
-        "small": "assets/abc123def456/thumb_small.jpg",
-        "medium": "assets/abc123def456/thumb_medium.jpg",
-        "large": "assets/abc123def456/thumb_large.jpg",
+        "small": "BATCH-2025-11/1/thumbs/inventory/photo.jpg.thumb_small.jpg",
+        "medium": "BATCH-2025-11/1/thumbs/inventory/photo.jpg.thumb_medium.jpg",
+        "large": "BATCH-2025-11/1/thumbs/inventory/photo.jpg.thumb_large.jpg",
     }
     assert result["size"] == len(b"fake-image-bytes")
     assert "skipped" not in result or result.get("skipped") is not True
@@ -131,15 +131,15 @@ async def test_upload_image_asset_persists_original_path_column(client_and_bucke
         result = await storage_client.upload_image_asset(
             original_bytes=b"img",
             filename="image.PNG",
-            file_hash="hash999",
-            batch_id="batch-002",
+            storage_dir="BATCH-2025-11/2",
+            relative_path="inventory/image.PNG",
         )
 
     # Confirms we persist `original_path`, not a non-existent `object_storage_key`
     assert "original_path" in result
     assert "object_storage_key" not in result
-    assert result["original_path"].startswith("assets/hash999/")
-    assert result["original_path"].endswith(".png")
+    assert result["original_path"].startswith("BATCH-2025-11/2/")
+    assert result["original_path"].lower().endswith(".png")
 
 
 @pytest.mark.asyncio
@@ -156,8 +156,8 @@ async def test_upload_image_asset_failure_raises_storage_error(client_and_bucket
             await storage_client.upload_image_asset(
                 original_bytes=b"img",
                 filename="photo.jpg",
-                file_hash="fail-hash",
-                batch_id="batch-003",
+                storage_dir="BATCH-2025-11/3",
+                relative_path="inventory/photo.jpg",
             )
 
 
@@ -175,14 +175,14 @@ async def test_upload_image_asset_retries_then_succeeds(client_and_bucket):
         result = await storage_client.upload_image_asset(
             original_bytes=b"img",
             filename="photo.jpg",
-            file_hash="retry-hash",
-            batch_id="batch-004",
+            storage_dir="BATCH-2025-11/4",
+            relative_path="inventory/photo.jpg",
         )
 
     # Original upload retried 3 times; thumbnails uploaded once each
     assert bucket.upload_call_count == 3 + len(FAKE_THUMBS), bucket.upload_call_count
-    assert result["original_path"] == "assets/retry-hash/original.jpg"
-    assert result["thumbnails"]["small"] == "assets/retry-hash/thumb_small.jpg"
+    assert result["original_path"] == "BATCH-2025-11/4/inventory/photo.jpg"
+    assert result["thumbnails"]["small"] == "BATCH-2025-11/4/thumbs/inventory/photo.jpg.thumb_small.jpg"
 
 
 @pytest.mark.asyncio
@@ -198,17 +198,17 @@ async def test_upload_skip_if_exists_idempotent(client_and_bucket):
         result = await storage_client.upload_image_asset(
             original_bytes=b"img",
             filename="photo.jpg",
-            file_hash="existing-hash",
-            batch_id="batch-005",
+            storage_dir="BATCH-2025-11/5",
+            relative_path="inventory/photo.jpg",
         )
 
     # All objects already exist -> nothing re-uploaded (idempotent skip)
     assert bucket.upload_call_count == 0, bucket.upload_call_count
-    assert result["original_path"] == "assets/existing-hash/original.jpg"
+    assert result["original_path"] == "BATCH-2025-11/5/inventory/photo.jpg"
     assert result["thumbnails"] == {
-        "small": "assets/existing-hash/thumb_small.jpg",
-        "medium": "assets/existing-hash/thumb_medium.jpg",
-        "large": "assets/existing-hash/thumb_large.jpg",
+        "small": "BATCH-2025-11/5/thumbs/inventory/photo.jpg.thumb_small.jpg",
+        "medium": "BATCH-2025-11/5/thumbs/inventory/photo.jpg.thumb_medium.jpg",
+        "large": "BATCH-2025-11/5/thumbs/inventory/photo.jpg.thumb_large.jpg",
     }
 
 
@@ -221,7 +221,7 @@ async def test_upload_file_sync_retry_exhaustion_raises(client_and_bucket):
     with pytest.raises(StorageError):
         storage_client.upload_file_sync(
             b"img",
-            "assets/x/original.jpg",
+            "BATCH-2025-11/1/inventory/photo.jpg",
             "image/jpeg",
         )
 
